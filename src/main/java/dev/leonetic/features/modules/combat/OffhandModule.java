@@ -1,10 +1,12 @@
 package dev.leonetic.features.modules.combat;
 
+import dev.leonetic.Homovore;
 import dev.leonetic.event.impl.entity.player.PreTickEvent;
 import dev.leonetic.event.impl.network.PacketEvent;
 import dev.leonetic.event.system.Subscribe;
 import dev.leonetic.features.modules.Module;
 import dev.leonetic.features.settings.Setting;
+import dev.leonetic.manager.SwapManager;
 import dev.leonetic.util.inventory.InventoryUtil;
 import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
 import net.minecraft.core.component.DataComponents;
@@ -37,6 +39,9 @@ public class OffhandModule extends Module {
 
     private int movedFromSlot = -1;
 
+    private static final int GAPPLE_SWAP_PRIORITY = 90;
+    private SwapManager.SwapHandle gappleLease;
+
     private boolean eatingGappleLatch = false;
     private int eatGraceTicks = 0;
 
@@ -56,6 +61,7 @@ public class OffhandModule extends Module {
         movedFromSlot = -1;
         eatingGappleLatch = false;
         eatGraceTicks = 0;
+        releaseGappleLease();
     }
 
     @Subscribe
@@ -84,15 +90,11 @@ public class OffhandModule extends Module {
         if (managingGapple) {
             boolean mainhandIsGapple = mc.player.getMainHandItem().is(Items.ENCHANTED_GOLDEN_APPLE);
 
-            if (!mainhandIsGapple) {
-                restoreGapple();
-                return;
-            }
+            if (rmb && mainhandIsGapple) return;
 
-            if (!want) {
-                if (isEatingGapple()) return;
-                restoreGapple();
-            }
+            if (isEatingGapple() || eatingGappleLatch) return;
+
+            restoreGapple();
             return;
         }
 
@@ -101,20 +103,32 @@ public class OffhandModule extends Module {
         if (mc.player.isUsingItem() || !isMainhandWeapon()) return;
 
         int hotbarGapple = findGappleInHotbarExcludingSelected();
+        int gappleSlot = hotbarGapple != -1 ? -1 : findGappleInInventory();
+        if (hotbarGapple == -1 && gappleSlot == -1) return;
+
+        if (!acquireGappleLease()) return;
+
+        originalSlot = InventoryUtil.selected();
         if (hotbarGapple != -1) {
-            originalSlot = InventoryUtil.selected();
             movedFromSlot = -1;
             InventoryUtil.swap(hotbarGapple);
-            managingGapple = true;
-            return;
-        }
-
-        int gappleSlot = findGappleInInventory();
-        if (gappleSlot != -1) {
-            originalSlot = InventoryUtil.selected();
+        } else {
             movedFromSlot = gappleSlot;
             InventoryUtil.swapToHotbarSlot(gappleSlot, originalSlot);
-            managingGapple = true;
+        }
+        managingGapple = true;
+    }
+
+    private boolean acquireGappleLease() {
+        if (gappleLease != null && !gappleLease.isReleased()) return true;
+        gappleLease = Homovore.swapManager.acquireLease("Offhand", GAPPLE_SWAP_PRIORITY);
+        return gappleLease != null;
+    }
+
+    private void releaseGappleLease() {
+        if (gappleLease != null) {
+            Homovore.swapManager.release(gappleLease);
+            gappleLease = null;
         }
     }
 
@@ -129,6 +143,7 @@ public class OffhandModule extends Module {
         managingGapple = false;
         originalSlot = -1;
         movedFromSlot = -1;
+        releaseGappleLease();
     }
 
     private boolean refillOffhandTotem() {

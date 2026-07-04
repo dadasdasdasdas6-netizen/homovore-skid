@@ -74,6 +74,16 @@ public class PlacementManager extends Feature {
 
     private boolean wasUsingItem = false;
 
+    private int lastSwapSequenceTick = -1;
+
+    private boolean swapSequenceAvailable() {
+        return mc.player == null || mc.player.tickCount != lastSwapSequenceTick;
+    }
+
+    private void markSwapSequenceUsed() {
+        if (mc.player != null) lastSwapSequenceTick = mc.player.tickCount;
+    }
+
     public interface PlacementListener {
         void onBlockUpdate(BlockPos pos, boolean nowAir);
     }
@@ -161,37 +171,41 @@ public class PlacementManager extends Feature {
         OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
         if (offhand != null && offhand.shouldDeferForEat()) return;
 
+        if (!swapSequenceAvailable()) return;
+
         int budget = WINDOW_LIMIT - recentPlacements.size();
         if (budget <= 0) return;
 
         List<PreparedClick> ready = new ArrayList<>();
+        List<PlacementTask> deferred = new ArrayList<>();
+        int burstSlot = -1;
         while (ready.size() < budget && !queue.isEmpty()) {
             PlacementTask task = queue.poll();
+            if (burstSlot != -1 && task.hotbarSlot() != burstSlot) {
+                deferred.add(task);
+                continue;
+            }
             queued.remove(task.pos());
             PreparedClick prepared = prepareClick(task);
-            if (prepared != null) ready.add(prepared);
+            if (prepared != null) {
+                ready.add(prepared);
+                burstSlot = task.hotbarSlot();
+            }
         }
+        for (PlacementTask task : deferred) queue.offer(task);
         if (ready.isEmpty()) return;
 
         placing = true;
         try {
             int originalSlot = InventoryUtil.selected();
-            int currentSelected = originalSlot;
-            int i = 0;
-            while (i < ready.size()) {
-                int slot = ready.get(i).hotbarSlot();
-                int j = i + 1;
-                while (j < ready.size() && ready.get(j).hotbarSlot() == slot) j++;
-                sendBurst(ready.subList(i, j), slot, currentSelected);
-                currentSelected = slot;
-                i = j;
-            }
-            if (currentSelected != originalSlot) {
+            sendBurst(ready, burstSlot, originalSlot);
+            if (burstSlot != originalSlot) {
                 mc.getConnection().send(new ServerboundSetCarriedItemPacket(originalSlot));
             }
         } finally {
             placing = false;
         }
+        markSwapSequenceUsed();
 
         long stamp = System.currentTimeMillis();
         for (PreparedClick p : ready) {
@@ -211,6 +225,8 @@ public class PlacementManager extends Feature {
         if (usingItemAnyTick()) return List.of();
         OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
         if (offhand != null && offhand.shouldDeferForEat()) return List.of();
+
+        if (!swapSequenceAvailable()) return List.of();
 
         int budget = WINDOW_LIMIT - recentPlacements.size();
         if (budget <= 0) return List.of();
@@ -234,6 +250,7 @@ public class PlacementManager extends Feature {
         } finally {
             placing = false;
         }
+        markSwapSequenceUsed();
 
         long stamp = System.currentTimeMillis();
         List<BlockPos> placed = new ArrayList<>(ready.size());
@@ -433,14 +450,73 @@ public class PlacementManager extends Feature {
     }
 
     public boolean placeCrystal(BlockPos base, int hotbarSlot, boolean trustBase) {
+        BlockHitResult hit = computeCrystalHit(base, trustBase);
+        if (hit == null) return false;
+
+        var conn = mc.getConnection();
+        int originalSlot = Homovore.swapManager.serverSlot();
+        boolean needSlotSwap = hotbarSlot != originalSlot;
+
+        if (needSlotSwap) {
+            conn.send(new ServerboundSetCarriedItemPacket(hotbarSlot));
+        }
+
+        try (var handler = ((ClientLevelAccessor) mc.level).homovore$getBlockStatePredictionHandler().startPredicting()) {
+            conn.send(new ServerboundUseItemOnPacket(InteractionHand.MAIN_HAND, hit, handler.currentSequence()));
+        }
+
+        if (needSlotSwap) {
+            conn.send(new ServerboundSetCarriedItemPacket(originalSlot));
+        }
+
+        return true;
+    }
+
+    public boolean placeCrystalOffhand(BlockPos base, int hotbarSlot, boolean trustBase) {
+        OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
+        if (offhand != null && offhand.shouldDeferForEat()) return false;
+
+        if (hasPending()) flushQueue();
+        if (!swapSequenceAvailable()) return false;
+
+        BlockHitResult hit = computeCrystalHit(base, trustBase);
+        if (hit == null) return false;
+
+        var conn = mc.getConnection();
+        int originalSlot = Homovore.swapManager.serverSlot();
+        boolean needSlotSwap = hotbarSlot != originalSlot;
+
+        if (needSlotSwap) {
+            conn.send(new ServerboundSetCarriedItemPacket(hotbarSlot));
+        }
+        conn.send(new ServerboundPlayerActionPacket(
+                ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN));
+        try {
+            try (var handler = ((ClientLevelAccessor) mc.level).homovore$getBlockStatePredictionHandler().startPredicting()) {
+                conn.send(new ServerboundUseItemOnPacket(InteractionHand.OFF_HAND, hit, handler.currentSequence()));
+            }
+        } finally {
+            conn.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN));
+            if (needSlotSwap) {
+                conn.send(new ServerboundSetCarriedItemPacket(originalSlot));
+            }
+        }
+        markSwapSequenceUsed();
+
+        return true;
+    }
+
+    @Nullable
+    private BlockHitResult computeCrystalHit(BlockPos base, boolean trustBase) {
         if (!trustBase) {
             var baseState = mc.level.getBlockState(base);
-            if (!baseState.is(Blocks.OBSIDIAN) && !baseState.is(Blocks.BEDROCK)) return false;
+            if (!baseState.is(Blocks.OBSIDIAN) && !baseState.is(Blocks.BEDROCK)) return null;
         }
 
         BlockPos airPos = base.above();
         var airState = mc.level.getBlockState(airPos);
-        if (!airState.isAir() && !(airState.is(Blocks.FIRE) && mc.level.dimension().equals(Level.END))) return false;
+        if (!airState.isAir() && !(airState.is(Blocks.FIRE) && mc.level.dimension().equals(Level.END))) return null;
 
         Vec3 eye = mc.player.getEyePosition(1.0f);
 
@@ -449,7 +525,7 @@ public class PlacementManager extends Feature {
             if (e instanceof ItemEntity) continue;
             if (e instanceof EndCrystal crystal && crystal.tickCount < 5) continue;
             if (e instanceof EndCrystal crystal && crystal.blockPosition().equals(airPos)) continue;
-            return false;
+            return null;
         }
 
         Vec3 baseCenter = Vec3.atCenterOf(base);
@@ -492,28 +568,10 @@ public class PlacementManager extends Feature {
         if (!insideBox) {
             Vec3 look = getLookVector(angles[0], angles[1]);
             Vec3 reachEnd = eye.add(look.scale(6.0));
-            if (baseBox.clip(eye, reachEnd).isEmpty()) return false;
+            if (baseBox.clip(eye, reachEnd).isEmpty()) return null;
         }
 
-        BlockHitResult hit = new BlockHitResult(hitVec, clickFace, base, false);
-
-        var conn = mc.getConnection();
-        int originalSlot = Homovore.swapManager.serverSlot();
-        boolean needSlotSwap = hotbarSlot != originalSlot;
-
-        if (needSlotSwap) {
-            conn.send(new ServerboundSetCarriedItemPacket(hotbarSlot));
-        }
-
-        try (var handler = ((ClientLevelAccessor) mc.level).homovore$getBlockStatePredictionHandler().startPredicting()) {
-            conn.send(new ServerboundUseItemOnPacket(InteractionHand.MAIN_HAND, hit, handler.currentSequence()));
-        }
-
-        if (needSlotSwap) {
-            conn.send(new ServerboundSetCarriedItemPacket(originalSlot));
-        }
-
-        return true;
+        return new BlockHitResult(hitVec, clickFace, base, false);
     }
 
     public boolean placeFireworksAlt(List<BlockPos> poses, Direction face, int hotbarSlot) {

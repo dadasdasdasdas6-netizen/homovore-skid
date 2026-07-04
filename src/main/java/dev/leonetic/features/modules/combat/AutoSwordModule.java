@@ -19,6 +19,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
@@ -38,6 +39,12 @@ public class AutoSwordModule extends Module {
     private final Setting<Double> delay = num("Delay", 0.92, 0.0, 1.0);
     private final Setting<Boolean> render = bool("Render", true);
     private final Setting<TpsMode> tpsMode = mode("TPS", TpsMode.LATEST);
+
+    private final Setting<Boolean> criticals = bool("Criticals", false);
+    private final Setting<Boolean> critsWithSword = bool("CritsWithSword", true)
+            .setVisibility(v -> criticals.getValue());
+    private final Setting<Boolean> critsPauseMoving = bool("CritsPauseMoving", true)
+            .setVisibility(v -> criticals.getValue());
 
     private Entity currentTarget = null;
     private float attackCooldownTicks = 0f;
@@ -100,6 +107,9 @@ public class AutoSwordModule extends Module {
             if (currentTarget.getBoundingBox().clip(eyePos, reachEnd).isEmpty()) return;
         }
 
+        ItemStack weaponStack = mc.player.getInventory().getItem(weaponSlot);
+        boolean doCrit = shouldCrit(weaponStack);
+
         int originalSlot = Homovore.swapManager.serverSlot();
         boolean needSwap = weaponSlot != originalSlot;
 
@@ -122,8 +132,21 @@ public class AutoSwordModule extends Module {
                 mc.getConnection().send(new ServerboundSetCarriedItemPacket(weaponSlot));
             }
 
+            if (doCrit) {
+                double px = mc.player.getX();
+                double py = mc.player.getY();
+                double pz = mc.player.getZ();
+                Homovore.positionManager.setPositionPacket(px, py + 0.0625, pz, false, false, false);
+                Homovore.positionManager.setPositionPacket(px, py, pz, false, false, false);
+            }
+
             mc.gameMode.attack(mc.player, currentTarget);
             mc.player.swing(InteractionHand.MAIN_HAND);
+
+            if (doCrit) {
+                Homovore.positionManager.setPositionPacket(
+                    mc.player.getX(), mc.player.getY(), mc.player.getZ(), true, false, false);
+            }
 
             if (needSwap) {
                 mc.getConnection().send(new ServerboundSetCarriedItemPacket(originalSlot));
@@ -132,7 +155,6 @@ public class AutoSwordModule extends Module {
             if (handle != null) Homovore.swapManager.release(handle);
         }
 
-        ItemStack weaponStack = mc.player.getInventory().getItem(weaponSlot);
         attackCooldownTicks = getBaseCooldownTicks(weaponStack, tps) * delay.getValue().floatValue();
     }
 
@@ -164,6 +186,24 @@ public class AutoSwordModule extends Module {
             if (mc.player.getInventory().getItem(slot).getItem() instanceof MaceItem) return true;
         }
         return false;
+    }
+
+    private boolean shouldCrit(ItemStack weaponStack) {
+        if (!criticals.getValue()) return false;
+
+        if (!mc.player.onGround()) return false;
+        if (mc.player.isInWater() || mc.player.isInLava()) return false;
+        if (mc.player.onClimbable() || mc.player.isPassenger()) return false;
+        if (mc.player.hasEffect(MobEffects.LEVITATION)) return false;
+
+        if (critsWithSword.getValue() && !weaponStack.is(ItemTags.SWORDS)) return false;
+
+        if (critsPauseMoving.getValue()) {
+            double dx = mc.player.getX() - mc.player.xo;
+            double dz = mc.player.getZ() - mc.player.zo;
+            if ((dx * dx + dz * dz) > 1.0E-5) return false;
+        }
+        return true;
     }
 
     private Entity findTarget() {

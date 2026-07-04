@@ -68,6 +68,7 @@ import java.util.function.BiFunction;
 public class AutoCrystalModule extends Module {
 
     private final Setting<Boolean> place         = bool("Place", true).setPage("General");
+    private final Setting<Boolean> offhandPlace  = bool("OffhandPlace", true).setPage("General");
     private final Setting<Integer> placeDelay    = num("PlaceDelay", 0, 0, 2000).setPage("General");
     private final Setting<Boolean> doBreak       = bool("Break", true).setPage("General");
     private final Setting<Integer> breakDelay    = num("BreakDelay", 0, 0, 2000).setPage("General");
@@ -87,9 +88,9 @@ public class AutoCrystalModule extends Module {
     private final Setting<Boolean> debug         = bool("Debug", false).setPage("Extra");
     private final Setting<Boolean> packetLog     = bool("PacketLog", false).setPage("Extra");
 
-    private static final double  PLACE_RANGE    = 5.14;
-    private static final double  BASE_PLACE_RANGE = 5.154;
-    private static final double  BREAK_RANGE    = 3.14;
+    private static final double  PLACE_RANGE    = 6.0;
+    private static final double  BASE_PLACE_RANGE = 6.0;
+    private static final double  BREAK_RANGE    = 3.0;
     private static final int     BALANCE        = 4;
     private static final double  HEALTH_BALANCE = 0.20;
     private static final double  ARMOR_BALANCE  = 0.20;
@@ -901,6 +902,17 @@ public class AutoCrystalModule extends Module {
 
         BlockPos base        = target.base;
         int slot             = result.slot();
+
+        if (offhandPlace.getValue()) {
+            diagPlaceAttempt++;
+            boolean sentOffhand = Homovore.placementManager.placeCrystalOffhand(base, slot, trustBase);
+            if (sentOffhand) {
+                diagPlaceSent++;
+                crystalPlaces.put(base.above().asLong(), System.currentTimeMillis());
+            }
+            return;
+        }
+
         int originalSlot     = InventoryUtil.selected();
 
         if (pendingSwapHandle != null && pendingSwapHandle.isReleased()) {

@@ -20,6 +20,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.boss.enderdragon.EndCrystal;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.FireworkRocketEntity;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
@@ -37,6 +38,8 @@ public class SurroundModule extends Module {
     private final Setting<Boolean> attack        = bool("Attack", true).setPage("General");
 
     private final Setting<Boolean> fireworks     = bool("Fireworks", true).setPage("General");
+
+    private final Setting<Boolean> avoidHelping  = bool("AvoidHelpingOpponents", true).setPage("General");
 
     private final Setting<Boolean> selfTrap      = bool("SelfTrap", true).setPage("SelfTrap");
     private final Setting<SelfTrapMode> selfTrapMode = mode("SelfTrapMode", SelfTrapMode.None).setPage("SelfTrap");
@@ -71,24 +74,38 @@ public class SurroundModule extends Module {
 
     private static final int FIREWORK_REDEPLOY_MARGIN_TICKS = 5;
 
-    private final Map<BlockPos, Long> enemyBrokenAt = new HashMap<>();
-    private static final long REBREAK_WINDOW_MS = 4000;
+    private final Set<BlockPos> extendPoses = ConcurrentHashMap.newKeySet();
+
+    private final Set<BlockPos> opponentSurroundPoses = ConcurrentHashMap.newKeySet();
+
+    private final Set<BlockPos> helpBlockedPoses = ConcurrentHashMap.newKeySet();
+
+    private final Map<BlockPos, Deque<Long>> breakTimes = new ConcurrentHashMap<>();
+    private static final long REBREAK_WINDOW_MS = 20 * 50;
+    private static final int REBREAK_THRESHOLD = 2;
 
     private final PlacementManager.PlacementListener airRefillListener = (pos, nowAir) -> {
 
         ownedQueued.remove(pos);
         if (!nowAir) return;
-        if (!wantedPoses.contains(pos)) return;
+
+        boolean wanted = wantedPoses.contains(pos);
+        if (!wanted && !extendPoses.contains(pos)) return;
+
+        recordBreak(pos, System.currentTimeMillis());
 
         if (fireworkPoses.contains(pos)) return;
 
         if (speedMineClaims(pos)) return;
 
-        if (cachedFireworkSlot >= 0 && isFullBlock(pos.above()) && isFullBlock(pos.below())) {
-            enemyBrokenAt.put(pos.immutable(), System.currentTimeMillis());
+        if (cachedFireworkSlot >= 0 && isHot(pos, System.currentTimeMillis())
+                && isFullBlock(pos.above()) && isFullBlock(pos.below())) {
             fireworkPoses.add(pos.immutable());
             return;
         }
+
+        if (!wanted) return;
+        if (helpBlockedPoses.contains(pos)) return;
         int slot = cachedObsSlot;
         if (slot < 0) return;
         if (!PlaceUtil.canPlace(pos)) return;
@@ -122,8 +139,11 @@ public class SurroundModule extends Module {
         ownedQueued.clear();
         wantedPoses.clear();
         fireworkPoses.clear();
+        extendPoses.clear();
+        opponentSurroundPoses.clear();
+        helpBlockedPoses.clear();
         fireworkDeployedAt.clear();
-        enemyBrokenAt.clear();
+        breakTimes.clear();
         cachedObsSlot = -1;
         cachedFireworkSlot = -1;
         renderMap.clear();
@@ -140,6 +160,7 @@ public class SurroundModule extends Module {
         if (!obs.found() || obs.type() == ResultType.OFFHAND) {
             cachedObsSlot = -1;
             wantedPoses.clear();
+            helpBlockedPoses.clear();
             return;
         }
         int obsSlot = obs.slot();
@@ -155,6 +176,7 @@ public class SurroundModule extends Module {
         List<BlockPos> fireworkPlacePoses = new ArrayList<>();
         wantedPoses.clear();
         fireworkPoses.clear();
+        extendPoses.clear();
         long now = System.currentTimeMillis();
 
         AABB bounds = mc.player.getBoundingBox();
@@ -189,8 +211,14 @@ public class SurroundModule extends Module {
                         checkSelfTrap(adjacent, now, placePoses);
                     }
 
+                    if (cachedFireworkSlot >= 0) {
+                        BlockPos extendPos = feetPos.relative(dir, 2);
+                        extendPoses.add(extendPos.immutable());
+                        tryFirework(extendPos, now, fireworkPlacePoses);
+                    }
+
                     if (extend.getValue() && extendMode.getValue() != ExtendMode.None) {
-                        checkExtend(feetPos, dir, now, placePoses, fireworkPlacePoses);
+                        checkExtend(feetPos, dir, now, placePoses);
                     }
                 }
 
@@ -265,8 +293,11 @@ public class SurroundModule extends Module {
             }
         }
 
+        computeHelpBlocked(minX, maxX, minZ, maxZ, feetY);
+
         for (BlockPos pos : placePoses) {
 
+            if (helpBlockedPoses.contains(pos)) continue;
             if (speedMineClaims(pos)) continue;
             if (!PlaceUtil.canPlace(pos)) continue;
 
@@ -281,7 +312,12 @@ public class SurroundModule extends Module {
 
         fireworkDeployedAt.entrySet().removeIf(e -> now - e.getValue() > FIREWORK_REDEPLOY_COOLDOWN_MS);
 
-        enemyBrokenAt.entrySet().removeIf(e -> now - e.getValue() > REBREAK_WINDOW_MS);
+        breakTimes.entrySet().removeIf(e -> {
+            synchronized (e.getValue()) {
+                Long newest = e.getValue().peekLast();
+                return newest == null || now - newest > REBREAK_WINDOW_MS;
+            }
+        });
     }
 
     @Override
@@ -356,7 +392,7 @@ public class SurroundModule extends Module {
         }
     }
 
-    private void checkExtend(BlockPos feet, Direction dir, long now, List<BlockPos> placePoses, List<BlockPos> fireworkPlacePoses) {
+    private void checkExtend(BlockPos feet, Direction dir, long now, List<BlockPos> placePoses) {
         BlockPos extendPos = feet.relative(dir, 2);
         boolean should = extendMode.getValue() == ExtendMode.Always;
 
@@ -377,7 +413,7 @@ public class SurroundModule extends Module {
             if ((below.is(Blocks.OBSIDIAN) || below.is(Blocks.BEDROCK))) {
                 wantedPoses.add(extendPos.immutable());
 
-                if (tryFirework(extendPos, now, fireworkPlacePoses)) {
+                if (fireworkPoses.contains(extendPos)) {
                     return;
                 }
                 if (state.isAir() || state.canBeReplaced()) {
@@ -385,6 +421,92 @@ public class SurroundModule extends Module {
                 }
             }
         }
+    }
+
+    private void computeHelpBlocked(int minX, int maxX, int minZ, int maxZ, int feetY) {
+        opponentSurroundPoses.clear();
+        helpBlockedPoses.clear();
+
+        if (!avoidHelping.getValue()) return;
+
+        buildOpponentSurroundPoses();
+        if (opponentSurroundPoses.isEmpty()) return;
+
+        boolean singleFootCell = minX == maxX && minZ == maxZ;
+        boolean lowHealth = mc.player.getHealth() < 10.0f;
+
+        if (singleFootCell || lowHealth) return;
+
+        Set<BlockPos> myFootCells = new HashSet<>();
+        for (int x = minX; x <= maxX; x++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                myFootCells.add(new BlockPos(x, feetY, z));
+            }
+        }
+
+        for (BlockPos pos : opponentSurroundPoses) {
+            if (!isNearMyPerimeter(pos, myFootCells)) {
+                helpBlockedPoses.add(pos.immutable());
+            }
+        }
+    }
+
+    private void buildOpponentSurroundPoses() {
+        BlockPos self = mc.player.blockPosition();
+
+        for (Player p : mc.level.players()) {
+            if (p == mc.player) continue;
+            if (Homovore.friendManager.isFriend(p)) continue;
+
+            BlockPos oFeet = p.blockPosition();
+            double dx = oFeet.getX() - self.getX();
+            double dz = oFeet.getZ() - self.getZ();
+            if (Math.sqrt(dx * dx + dz * dz) > 5.0) continue;
+            if (isEntityPhased(p)) continue;
+
+            AABB pb = p.getBoundingBox();
+            int oy = oFeet.getY();
+            int oMinX = PlaceUtil.minCell(pb.minX);
+            int oMaxX = PlaceUtil.maxCell(pb.maxX);
+            int oMinZ = PlaceUtil.minCell(pb.minZ);
+            int oMaxZ = PlaceUtil.maxCell(pb.maxZ);
+
+            for (int x = oMinX; x <= oMaxX; x++) {
+                for (int z = oMinZ; z <= oMaxZ; z++) {
+                    BlockPos cell = new BlockPos(x, oy, z);
+
+                    for (Direction dir : HORIZONTALS) {
+                        BlockPos adj = cell.relative(dir);
+                        if (adj.getX() >= oMinX && adj.getX() <= oMaxX
+                                && adj.getZ() >= oMinZ && adj.getZ() <= oMaxZ) continue;
+                        opponentSurroundPoses.add(adj.immutable());
+                    }
+
+                    opponentSurroundPoses.add(cell.below().immutable());
+                    opponentSurroundPoses.add(cell.immutable());
+                }
+            }
+        }
+    }
+
+    private boolean isNearMyPerimeter(BlockPos pos, Set<BlockPos> myFootCells) {
+        for (BlockPos cell : myFootCells) {
+            if (pos.equals(cell)
+                    || pos.equals(cell.above())
+                    || pos.equals(cell.below())
+                    || pos.equals(cell.north())
+                    || pos.equals(cell.south())
+                    || pos.equals(cell.east())
+                    || pos.equals(cell.west())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isEntityPhased(Player p) {
+        BlockState state = mc.level.getBlockState(p.blockPosition());
+        return !state.isAir() && !state.canBeReplaced();
     }
 
     private boolean tryFirework(BlockPos pos, long now, List<BlockPos> out) {
@@ -404,9 +526,26 @@ public class SurroundModule extends Module {
         return true;
     }
 
+    private void recordBreak(BlockPos pos, long now) {
+        Deque<Long> times = breakTimes.computeIfAbsent(pos.immutable(), p -> new ArrayDeque<>());
+        synchronized (times) {
+            times.addLast(now);
+            while (!times.isEmpty() && now - times.peekFirst() > REBREAK_WINDOW_MS) {
+                times.pollFirst();
+            }
+        }
+    }
+
     private boolean isHot(BlockPos pos, long now) {
-        Long t = enemyBrokenAt.get(pos);
-        return t != null && now - t <= REBREAK_WINDOW_MS;
+        Deque<Long> times = breakTimes.get(pos);
+        if (times == null) return false;
+        int count = 0;
+        synchronized (times) {
+            for (long t : times) {
+                if (now - t <= REBREAK_WINDOW_MS) count++;
+            }
+        }
+        return count > REBREAK_THRESHOLD;
     }
 
     private boolean isFullBlock(BlockPos pos) {

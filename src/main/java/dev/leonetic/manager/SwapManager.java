@@ -17,7 +17,7 @@ import net.minecraft.world.item.Items;
 public class SwapManager extends Feature {
     private SwapHandle active;
 
-    private SwapHandle suspendedLease;
+    private SwapHandle suspended;
 
     private int serverSlot = -1;
 
@@ -193,7 +193,7 @@ public class SwapManager extends Feature {
             req.action.accept(req.target);
             return true;
         }
-        SwapHandle h = acquire(req.id, req.priority);
+        SwapHandle h = acquire(req.id, req.priority, false, req.silent);
         if (h == null) return false;
         int last = h.originalSlot;
         try {
@@ -213,22 +213,26 @@ public class SwapManager extends Feature {
     }
 
     public SwapHandle acquire(String id, int priority) {
-        return acquire(id, priority, false);
+        return acquire(id, priority, false, false);
     }
 
     public SwapHandle acquireLease(String id, int priority) {
-        return acquire(id, priority, true);
+        return acquire(id, priority, true, false);
     }
 
-    private SwapHandle acquire(String id, int priority, boolean lease) {
+    private SwapHandle acquire(String id, int priority, boolean lease, boolean altSwap) {
         if (nullCheck()) return null;
+        if (altSwap) {
+            if (active != null)
+                log("acquire " + id + "/" + priority + " alt-borrows " + active.id + "/" + active.priority);
+            return new SwapHandle(id, priority, InventoryUtil.selected());
+        }
         if (active != null) {
             if (active.priority >= priority) {
                 log("acquire DENIED " + id + "/" + priority + " — held by " + active.id + "/" + active.priority);
                 return null;
-            }
-            if (active.lease) {
-                suspendedLease = active;
+            } else if (active.lease) {
+                suspended = active;
                 log("acquire " + id + "/" + priority + " borrows lease " + active.id + "/" + active.priority);
             } else {
                 log("acquire " + id + "/" + priority + " preempts " + active.id + "/" + active.priority);
@@ -248,19 +252,19 @@ public class SwapManager extends Feature {
     public void release(SwapHandle h) {
         if (h == null || h.released) return;
         h.released = true;
-        if (suspendedLease == h) suspendedLease = null;
+        if (suspended == h) suspended = null;
         if (active != h) return;
         log("release " + h.id + "/" + h.priority);
         resumeOrClear();
     }
 
     private void resumeOrClear() {
-        if (suspendedLease != null && !suspendedLease.released) {
-            active = suspendedLease;
-            suspendedLease = null;
-            log("resume lease " + active.id + "/" + active.priority);
+        if (suspended != null && !suspended.released) {
+            active = suspended;
+            suspended = null;
+            log("resume " + active.id + "/" + active.priority);
         } else {
-            suspendedLease = null;
+            suspended = null;
             active = null;
         }
     }

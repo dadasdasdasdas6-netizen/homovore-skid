@@ -4,21 +4,31 @@ import dev.leonetic.Homovore;
 import dev.leonetic.event.impl.entity.player.TickEvent;
 import dev.leonetic.event.system.Subscribe;
 import dev.leonetic.features.modules.Module;
+import dev.leonetic.features.modules.world.SpeedMineModule;
+import dev.leonetic.features.settings.Setting;
 import dev.leonetic.manager.RotationRequest;
 import dev.leonetic.manager.SwapRequest;
 import dev.leonetic.mixin.client.ClientLevelAccessor;
+import dev.leonetic.util.InteractionUtil;
 import dev.leonetic.util.inventory.InventoryUtil;
 import dev.leonetic.util.inventory.Result;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.protocol.game.ServerboundUseItemPacket;
 import net.minecraft.util.Mth;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.Shapes;
 
 public class PhaseModule extends Module {
 
     private static final double CORNER_THRESHOLD = 0.5;
     private static final double CORNER_OFFSET = 0.5;
+
+    private static final int PRIORITY = 150;
+
+    private final Setting<Boolean> crawlMine = bool("CrawlMine", false);
 
     public PhaseModule() {
         super("Phase", "Phases into walls", Category.COMBAT);
@@ -31,7 +41,9 @@ public class PhaseModule extends Module {
             return;
         }
 
-        if (Homovore.rotationManager.isSilentSyncRequired()) return;
+        if (tryCrawlMine()) return;
+
+        if (Homovore.rotationManager.isSilentSyncRequiredAtLeast(PRIORITY)) return;
 
         Result pearl = InventoryUtil.find(Items.ENDER_PEARL, InventoryUtil.FULL_SCOPE);
         if (!pearl.found()) {
@@ -53,7 +65,7 @@ public class PhaseModule extends Module {
         float yaw = calcYaw(target);
         float pitch = mc.player.getBlockY() > 4 ? 85f : 75f;
 
-        Homovore.rotationManager.submit(new RotationRequest("phase", 150, yaw, pitch, RotationRequest.Mode.SILENT));
+        Homovore.rotationManager.submit(new RotationRequest("phase", PRIORITY, yaw, pitch, RotationRequest.Mode.SILENT));
 
         mc.gameMode.ensureHasSentCarriedItem();
         boolean thrown = Homovore.swapManager.submit(new SwapRequest("Phase", 80, pearl, r -> {
@@ -63,6 +75,28 @@ public class PhaseModule extends Module {
         }, true));
 
         if (thrown) disable();
+    }
+
+    private boolean tryCrawlMine() {
+        if (!crawlMine.getValue()) return false;
+        if (mc.player.isCrouching()) return false;
+
+        BlockPos feetPos = mc.player.blockPosition();
+        BlockPos headPos = feetPos.above();
+        BlockState feetBlock = mc.level.getBlockState(feetPos);
+        BlockState headBlock = mc.level.getBlockState(headPos);
+
+        if (!isBlocked(feetPos, feetBlock) || !isBlocked(headPos, headBlock)) return false;
+        if (!InteractionUtil.canBreak(feetPos, feetBlock)) return false;
+
+        SpeedMineModule mine = Homovore.moduleManager.getModuleByClass(SpeedMineModule.class);
+        if (mine == null || !mine.isEnabled()) return false;
+
+        return mine.silentBreakBlock(feetPos, 200);
+    }
+
+    private boolean isBlocked(BlockPos pos, BlockState state) {
+        return !state.canBeReplaced() && state.getShape(mc.level, pos) != Shapes.empty();
     }
 
     private Vec3 calculateTargetPos() {

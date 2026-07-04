@@ -102,6 +102,19 @@ public class InteractionUtil implements Util {
     }
 
     public static double getBlockBreakingSpeed(int slot, BlockState block) {
+        double speed = rawMiningSpeed(slot, block, mc.player.onGround());
+
+        float hardness = block.getDestroySpeed(null, null);
+        if (hardness == -1) return 0;
+
+        speed /= hardness / (!block.requiresCorrectToolForDrops() || mc.player.getInventory().getNonEquipmentItems().get(slot).isCorrectToolForDrops(block) ? 30 : 100);
+
+        float ticks = (float) (Math.floor(1.0f / speed) + 1.0f);
+
+        return (long) ((ticks / 20.0f) * 1000);
+    }
+
+    public static double rawMiningSpeed(int slot, BlockState block, boolean onGround) {
         double speed = mc.player.getInventory().getNonEquipmentItems().get(slot).getDestroySpeed(block);
 
         if (speed > 1) {
@@ -131,18 +144,33 @@ public class InteractionUtil implements Util {
             speed /= 5.0F;
         }
 
-        if (!mc.player.onGround()) {
+        if (!onGround) {
             speed /= 5.0F;
         }
 
+        return speed;
+    }
+
+    public static double breakDelta(double speed, BlockState block) {
         float hardness = block.getDestroySpeed(null, null);
         if (hardness == -1) return 0;
 
-        speed /= hardness / (!block.requiresCorrectToolForDrops() || mc.player.getInventory().getNonEquipmentItems().get(slot).isCorrectToolForDrops(block) ? 30 : 100);
+        return speed / hardness / 30.0;
+    }
 
-        float ticks = (float) (Math.floor(1.0f / speed) + 1.0f);
+    public static int fastestToolSlot(BlockState block) {
+        int best = mc.player.getInventory().getSelectedSlot();
+        double bestSpeed = -1;
 
-        return (long) ((ticks / 20.0f) * 1000);
+        for (int i = 0; i < 9; i++) {
+            double speed = rawMiningSpeed(i, block, true);
+            if (speed > bestSpeed) {
+                bestSpeed = speed;
+                best = i;
+            }
+        }
+
+        return best;
     }
 
     public static Direction right(Direction direction) {

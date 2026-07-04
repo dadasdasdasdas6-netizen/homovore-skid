@@ -26,6 +26,7 @@ import dev.leonetic.features.modules.world.NukerModule;
 import dev.leonetic.features.modules.world.ScaffoldModule;
 import dev.leonetic.features.modules.render.BlockHighlightModule;
 import dev.leonetic.features.modules.render.BreadcrumbsModule;
+import dev.leonetic.features.modules.render.BreakIndicatorsModule;
 import dev.leonetic.features.modules.funny.AutoHorseModule;
 import dev.leonetic.features.modules.funny.DiscordRPCModule;
 import dev.leonetic.features.modules.funny.EndermanLookModule;
@@ -76,6 +77,7 @@ public class ModuleManager implements Jsonable, Util {
         register(new FastuseModule());
         register(new BlockHighlightModule());
         register(new BreadcrumbsModule());
+        register(new BreakIndicatorsModule());
         register(new AutoHorseModule());
         register(new DiscordRPCModule());
         register(new EndermanLookModule());

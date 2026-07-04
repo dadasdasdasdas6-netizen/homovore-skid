@@ -291,6 +291,11 @@ public class RotationManager {
     }
 
     public boolean isSilentSyncRequired() { return silentSyncRequired; }
+
+    public boolean isSilentSyncRequiredAtLeast(int priority) {
+        return silentSyncRequired && silentSentPriority >= priority;
+    }
+
     public void setSilentSyncRequired(boolean required) { silentSyncRequired = required; }
 
     public void resetSilentTick() { silentSentThisTick = false; }
