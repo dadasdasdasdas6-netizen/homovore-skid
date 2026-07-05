@@ -20,8 +20,12 @@ import dev.leonetic.util.inventory.Result;
 import dev.leonetic.util.inventory.ResultType;
 import dev.leonetic.util.models.Timer;
 import dev.leonetic.util.player.ChatUtil;
+import dev.leonetic.mixin.entity.LivingEntityEffectParticlesAccessor;
+import it.unimi.dsi.fastutil.ints.Int2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongIterator;
+import net.minecraft.core.particles.ColorParticleOption;
+import net.minecraft.core.particles.ParticleOptions;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
@@ -79,6 +83,10 @@ public class AutoCrystalModule extends Module {
     private final Setting<Double>  maxSelfDamage = num("MaxSelfDamage", 4.0, 0.0, 36.0).setPage("General");
     private final Setting<Boolean> antiSurround  = bool("AntiSurround", true).setPage("General");
     private final Setting<Integer> antiSurroundCompletion = num("AntiSurroundCompletion", 70, 0, 100).setPage("General");
+
+    private final Setting<Boolean> assumeResistance       = bool("AssumeResistance", true).setPage("General");
+    private final Setting<Integer> assumedResistanceLevel = num("AssumedResistanceLevel", 3, 1, 5).setPage("General");
+    private final Setting<Integer> resistanceHoldMs       = num("ResistanceHoldMs", 600, 0, 5000).setPage("General");
 
     private final Setting<Boolean> antiChinese   = bool("AntiChinese", false).setPage("AntiChinese");
 
@@ -147,6 +155,10 @@ public class AutoCrystalModule extends Module {
 
     private final Set<Integer> deadIds = ConcurrentHashMap.newKeySet();
 
+    private final Int2LongOpenHashMap resistanceSeen = new Int2LongOpenHashMap();
+
+    private static int resistanceRgb = Integer.MIN_VALUE;
+
     private final Set<BlockPos> seeThrough = new HashSet<>();
 
     private int cachedChunkX = Integer.MIN_VALUE;
@@ -163,12 +175,15 @@ public class AutoCrystalModule extends Module {
         basePlaceMinDamage.setVisibility(v -> basePlace.getValue());
         antiChineseRange.setVisibility(v -> antiChinese.getValue());
         antiChineseEnemyRange.setVisibility(v -> antiChinese.getValue());
+        assumedResistanceLevel.setVisibility(v -> assumeResistance.getValue());
+        resistanceHoldMs.setVisibility(v -> assumeResistance.getValue());
     }
 
     @Override
     public void onEnable() {
         crystalPlaces.clear();
         deadIds.clear();
+        resistanceSeen.clear();
         placeTimer.reset();
         breakTimer.reset();
         lastBestDamage = 0;
@@ -952,8 +967,8 @@ public class AutoCrystalModule extends Module {
 
             float armor     = (float) living.getAttributeValue(Attributes.ARMOR);
             float toughness = (float) living.getAttributeValue(Attributes.ARMOR_TOUGHNESS);
-            MobEffectInstance resistance = living.getEffect(MobEffects.RESISTANCE);
-            float resistMult = resistance != null ? 1.0f - 0.2f * (resistance.getAmplifier() + 1) : 1.0f;
+            int resistAmp = resolveResistanceAmplifier(living);
+            float resistMult = resistAmp >= 0 ? Math.max(0f, 1.0f - 0.2f * (resistAmp + 1)) : 1.0f;
 
             int protPoints = 0;
             if (!living.getItemBySlot(EquipmentSlot.HEAD).isEmpty())  protPoints += 4;
@@ -966,6 +981,48 @@ public class AutoCrystalModule extends Module {
                     armor, toughness, resistMult, protPoints));
         }
         return out;
+    }
+
+    private int resolveResistanceAmplifier(LivingEntity living) {
+        MobEffectInstance real = living.getEffect(MobEffects.RESISTANCE);
+        if (real != null) return real.getAmplifier();
+        if (!assumeResistance.getValue()) return -1;
+
+        long now = System.currentTimeMillis();
+        if (hasResistanceParticle(living)) {
+            resistanceSeen.put(living.getId(), now);
+            return assumedResistanceLevel.getValue() - 1;
+        }
+        long last = resistanceSeen.getOrDefault(living.getId(), 0L);
+        if (last != 0L && now - last <= resistanceHoldMs.getValue()) {
+            return assumedResistanceLevel.getValue() - 1;
+        }
+        return -1;
+    }
+
+    private static boolean hasResistanceParticle(LivingEntity living) {
+        int ref = resistanceRgb();
+        if (ref < 0) return false;
+        List<ParticleOptions> particles = living.getEntityData()
+                .get(LivingEntityEffectParticlesAccessor.homovore$getDataEffectParticles());
+        for (int i = 0, n = particles.size(); i < n; i++) {
+            if (particles.get(i) instanceof ColorParticleOption c && rgbOf(c) == ref) return true;
+        }
+        return false;
+    }
+
+    private static int resistanceRgb() {
+        if (resistanceRgb == Integer.MIN_VALUE) {
+            ParticleOptions po = new MobEffectInstance(MobEffects.RESISTANCE).getParticleOptions();
+            resistanceRgb = po instanceof ColorParticleOption c ? rgbOf(c) : -1;
+        }
+        return resistanceRgb;
+    }
+
+    private static int rgbOf(ColorParticleOption c) {
+        return (Math.round(c.getRed() * 255f) << 16)
+                | (Math.round(c.getGreen() * 255f) << 8)
+                | Math.round(c.getBlue() * 255f);
     }
 
     private void updateSeeThrough() {
