@@ -94,6 +94,7 @@ public class ModuleManager implements Jsonable, Util {
         register(new MiddleClickExtraModule());
         register(new KeyPotionModule());
         register(new SurroundModule());
+        register(new PistonCrystalModule());
         register(new PearlBlockerModule());
         register(new PhaseModule());
         register(new TrickshotModule());
