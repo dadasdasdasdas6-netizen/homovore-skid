@@ -6,6 +6,7 @@ import dev.leonetic.event.impl.network.PacketEvent;
 import dev.leonetic.event.system.Subscribe;
 import dev.leonetic.features.Feature;
 import dev.leonetic.util.inventory.InventoryUtil;
+import dev.leonetic.util.inventory.ResultType;
 import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
@@ -193,24 +194,18 @@ public class SwapManager extends Feature {
             req.action.accept(req.target);
             return true;
         }
-
-        // Another swap is already holding the hotbar this tick. Don't fight it
-        // with a competing carried-item change (which would get denied by
-        // acquire and stall us) — click the item into the slot that swap is
-        // holding instead, act, then click back.
-        if (req.silent || blockedByActiveHold(req.id, req.priority)) {
-            return altSwap(req);
-        }
-
-        SwapHandle h = acquire(req.id, req.priority, false, false);
+        boolean silent = req.silent || req.target.type() == ResultType.INVENTORY;
+        SwapHandle h = acquire(req.id, req.priority, false, silent);
         if (h == null) return false;
         int last = h.originalSlot;
         try {
-            if (!InventoryUtil.swap(req.target)) return false;
+            boolean swapped = silent ? InventoryUtil.swapSilent(req.target) : InventoryUtil.swap(req.target);
+            if (!swapped) return false;
             try {
                 req.action.accept(req.target);
             } finally {
-                InventoryUtil.swapBack(req.target, last);
+                if (silent) InventoryUtil.swapBackSilent(req.target);
+                else InventoryUtil.swapBack(req.target, last);
             }
             return true;
         } finally {

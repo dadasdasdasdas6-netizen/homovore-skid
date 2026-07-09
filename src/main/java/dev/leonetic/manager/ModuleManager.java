@@ -20,6 +20,10 @@ import dev.leonetic.features.modules.funny.TrickshotModule;
 import dev.leonetic.features.modules.funny.MoFuckerModule;
 import dev.leonetic.features.modules.movement.SprintModule;
 import dev.leonetic.features.modules.movement.VelocityModule;
+import dev.leonetic.features.modules.movement.NoSlowModule;
+import dev.leonetic.features.modules.movement.ElytraAssistModule;
+import dev.leonetic.features.modules.movement.ElytraFlyModule;
+import dev.leonetic.features.modules.movement.ElytraDashModule;
 import dev.leonetic.features.modules.world.AutoPortalModule;
 import dev.leonetic.features.modules.world.FastPortalModule;
 import dev.leonetic.features.modules.world.BomberModule;
@@ -43,6 +47,7 @@ import dev.leonetic.features.modules.render.TablistModule;
 import dev.leonetic.features.modules.render.NoRenderModule;
 import dev.leonetic.features.modules.render.PopEffectsModule;
 import dev.leonetic.features.modules.render.QuadSupremeModule;
+import dev.leonetic.features.modules.render.ViewModelModule;
 import dev.leonetic.util.traits.Jsonable;
 import dev.leonetic.util.traits.Util;
 import org.slf4j.Logger;
@@ -73,9 +78,10 @@ public class ModuleManager implements Jsonable, Util {
         register(new AutoXPModule());
         register(new VelocityModule());
         register(new SprintModule());
-        register(new dev.leonetic.features.modules.movement.ElytraAssistModule());
-        register(new dev.leonetic.features.modules.movement.ElytraFlyModule());
-        register(new dev.leonetic.features.modules.movement.ElytraDashModule());
+        register(new ElytraAssistModule());
+        register(new ElytraFlyModule());
+        register(new ElytraDashModule());
+        register(new NoSlowModule());
 
         register(new AutoPortalModule());
         register(new FastPortalModule());
@@ -97,6 +103,7 @@ public class ModuleManager implements Jsonable, Util {
         register(new LogoutSpotsModule());
         register(new PopEffectsModule());
         register(new QuadSupremeModule());
+        register(new ViewModelModule());
         register(new MiddleClickExtraModule());
         register(new KeyPotionModule());
         register(new SurroundModule());
@@ -111,6 +118,7 @@ public class ModuleManager implements Jsonable, Util {
         register(new ScaffoldModule());
         register(new ReplenishModule());
         register(new InstantRekitModule());
+        register(new NoRotateModule());
 
         LOGGER.info("Registered {} modules", modules.size());
 

@@ -656,7 +656,7 @@ public class AutoCrystalModule extends Module {
     }
 
     private boolean doBasePlace(BasePlaceTarget target) {
-        Result obs = InventoryUtil.find(Items.OBSIDIAN, InventoryUtil.HOTBAR_SCOPE);
+        Result obs = InventoryUtil.find(Items.OBSIDIAN, InventoryUtil.PLACE_SCOPE);
         if (!obs.found() || obs.type() == ResultType.OFFHAND) return false;
         int slot = obs.slot();
 
@@ -1082,7 +1082,7 @@ public class AutoCrystalModule extends Module {
     }
 
     private void doPlace(PlaceTarget target, boolean trustBase) {
-        Result result = InventoryUtil.find(Items.END_CRYSTAL, EnumSet.of(ResultType.HOTBAR));
+        Result result = InventoryUtil.find(Items.END_CRYSTAL, InventoryUtil.PLACE_SCOPE);
         if (!result.found()) {
             lastBestDamage = 0;
             return;
@@ -1103,7 +1103,17 @@ public class AutoCrystalModule extends Module {
             return;
         }
 
-        int originalSlot     = InventoryUtil.selected();
+        if (result.type() == ResultType.INVENTORY) {
+            diagPlaceAttempt++;
+            if (Homovore.placementManager.placeCrystal(base, slot, trustBase)) {
+                diagPlaceSent++;
+                crystalPlaces.put(base.above().asLong(), System.currentTimeMillis());
+                markRender(base.above());
+            }
+            return;
+        }
+
+        int originalSlot     = Homovore.swapManager.serverSlot();
 
         if (pendingSwapHandle != null && pendingSwapHandle.isReleased()) {
             pendingSwapHandle = null;
