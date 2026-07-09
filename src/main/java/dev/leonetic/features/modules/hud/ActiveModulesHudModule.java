@@ -6,14 +6,12 @@ import com.google.gson.JsonObject;
 import dev.leonetic.Homovore;
 import dev.leonetic.event.impl.render.Render2DEvent;
 import dev.leonetic.features.modules.Module;
-import dev.leonetic.features.modules.client.ClickGuiModule;
 import dev.leonetic.features.modules.client.HudClientModule;
 import dev.leonetic.features.modules.client.HudModule;
 import dev.leonetic.features.settings.Bind;
 import dev.leonetic.util.traits.Jsonable;
 import net.minecraft.client.gui.GuiGraphics;
 
-import java.awt.Color;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -98,18 +96,11 @@ public class ActiveModulesHudModule extends HudModule implements Jsonable {
                 cursor += mc.font.width(meta);
             }
             if (!suffix.isEmpty()) {
-                ctx.drawString(mc.font, suffix, cursor, y, bindColor(module));
+                ctx.drawString(mc.font, suffix, cursor, y, activeColor);
             }
 
             y += mc.font.lineHeight;
         }
-    }
-
-    private int bindColor(Module module) {
-        ClickGuiModule gui = ClickGuiModule.getInstance();
-        if (gui == null) return GRAY;
-        Color accent = gui.categoryAccent(module.getCategory());
-        return new Color(accent.getRed(), accent.getGreen(), accent.getBlue(), 255).getRGB();
     }
 
     private int bottomRightTop(HudClientModule hudClient) {
