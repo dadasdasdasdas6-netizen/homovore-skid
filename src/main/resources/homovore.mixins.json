@@ -31,7 +31,6 @@
     "input.MixinMouse",
     "network.MixinClientCommonPacketListenerImpl",
     "network.MixinClientPlayNetworkHandler",
-    "network.MixinConnectScreen",
     "network.MixinMultiPlayerGameMode",
     "render.GLBufferAccessor",
     "render.MixinBlockRenderDispatcher",
