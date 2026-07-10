@@ -17,118 +17,166 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
 import java.awt.Color;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.stream.Collectors;
 
 public class BreakIndicatorsModule extends Module {
 
-    private static final long TTL_MS = 2000L;
+    private final Setting<Boolean> useDoubleminePrediction = bool("UseDoubleminePrediction", false).setPage("General");
+    private final Setting<Float> rebreakCompletionAmount = num("RebreakCompletionAmount", 0.7f, 0.0f, 1.5f).setPage("General");
+    private final Setting<Float> completionAmount = num("FullCompletionAmount", 1.0f, 0.0f, 1.5f).setPage("General");
+    private final Setting<Float> removeCompletionAmount = num("ForceRemoveCompletionAmount", 1.3f, 0.0f, 1.5f).setPage("General");
+    private final Setting<Boolean> ignoreFriends = bool("IgnoreFriends", false).setPage("General");
 
-    public Setting<Boolean> ignoreFriends = bool("IgnoreFriends", false).setPage("General");
-    public Setting<Float> completion = num("Completion", 1.0f, 0.1f, 1.5f).setPage("General");
+    private final Setting<Boolean> render = bool("DoRender", true).setPage("Render");
+    private final Setting<Float> lineWidth = num("LineWidth", 1.5f, 0.5f, 5.0f).setPage("Render");
+    private final Setting<Color> sideColor = color("SideColor", 255, 0, 80, 10).setPage("Render");
+    private final Setting<Color> lineColor = color("LineColor", 255, 255, 255, 40).setPage("Render");
 
-    public Setting<Float> lineWidth = num("LineWidth", 1.5f, 0.5f, 5.0f).setPage("Render");
-    public Setting<Color> lineColor = color("LineColor", 255, 255, 255, 120).setPage("Render");
-    public Setting<Color> sideColor = color("SideColor", 255, 0, 80, 40).setPage("Render");
-
-    private final Map<Long, BreakEntry> breaks = new ConcurrentHashMap<>();
+    private final Queue<BlockBreak> breakPackets = new ConcurrentLinkedQueue<>();
+    private final Map<BlockPos, BlockBreak> breakStartTimes = new HashMap<>();
 
     public BreakIndicatorsModule() {
-        super("BreakIndicators", "Renders the progress of blocks being broken by others", Category.RENDER);
+        super("BreakIndicators", "Renders the progress of a block being broken.", Category.RENDER);
     }
 
     @Override
     public void onEnable() {
-        breaks.clear();
+        breakPackets.clear();
+        breakStartTimes.clear();
     }
 
     @Override
     public void onDisable() {
-        breaks.clear();
+        breakPackets.clear();
+        breakStartTimes.clear();
     }
 
     @Subscribe
     private void onPacket(PacketEvent.Receive event) {
         if (nullCheck()) return;
-        if (!(event.getPacket() instanceof ClientboundBlockDestructionPacket pkt)) return;
-        if (mc.player != null && pkt.getId() == mc.player.getId()) return;
+        if (!(event.getPacket() instanceof ClientboundBlockDestructionPacket packet)) return;
 
-        BlockPos pos = pkt.getPos();
-        int stage = pkt.getProgress();
+        Entity entity = mc.level.getEntity(packet.getId());
+        breakPackets.add(new BlockBreak(packet.getPos().immutable(), currentTick(0.0f), entity));
+    }
 
-        if (stage < 0 || stage > 9) {
-            breaks.remove(pos.asLong());
-            return;
-        }
-
-        Entity entity = mc.level.getEntity(pkt.getId());
-        if (ignoreFriends.getValue() && entity instanceof Player player && Homovore.friendManager.isFriend(player)) {
-            breaks.remove(pos.asLong());
-            return;
-        }
-
-        BreakEntry entry = breaks.computeIfAbsent(pos.asLong(), k -> new BreakEntry(pos.immutable(), mc.level.getGameTime()));
-        entry.entity = entity;
-        entry.stage = stage;
-        entry.lastUpdate = System.currentTimeMillis();
+    public boolean isBlockBeingBroken(BlockPos blockPos) {
+        return breakStartTimes.containsKey(blockPos);
     }
 
     @Subscribe
-    private void onRenderEvent(Render3DEvent event) {
-        if (nullCheck() || breaks.isEmpty()) return;
+    private void onRender(Render3DEvent event) {
+        if (nullCheck()) return;
 
-        long time = System.currentTimeMillis();
+        double currentTick = currentTick(event.getDelta());
 
-        Iterator<Map.Entry<Long, BreakEntry>> it = breaks.entrySet().iterator();
-        while (it.hasNext()) {
-            BreakEntry entry = it.next().getValue();
-            BlockPos pos = entry.pos;
-            BlockState state = mc.level.getBlockState(pos);
+        while (!breakPackets.isEmpty()) {
+            BlockBreak breakEvent = breakPackets.remove();
 
-            if (time - entry.lastUpdate > TTL_MS || state.isAir() || !InteractionUtil.canBreak(pos, state)) {
-                it.remove();
+            if (useDoubleminePrediction.getValue() && breakEvent.entity instanceof Player) {
+                List<BlockBreak> playerBreakingBlocks = breakStartTimes.values().stream()
+                        .filter(x -> x.entity == breakEvent.entity && !x.blockPos.equals(breakEvent.blockPos))
+                        .sorted(Comparator.comparingDouble(x -> x.startTick))
+                        .toList();
+
+                if (playerBreakingBlocks.size() >= 2) {
+                    breakStartTimes.remove(playerBreakingBlocks.getLast().blockPos);
+                }
+            }
+
+            breakStartTimes.putIfAbsent(breakEvent.blockPos, breakEvent);
+        }
+
+        Iterator<Map.Entry<BlockPos, BlockBreak>> iterator = breakStartTimes.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<BlockPos, BlockBreak> entry = iterator.next();
+            BlockState state = mc.level.getBlockState(entry.getKey());
+
+            if (state.isAir()
+                    || entry.getValue().getBreakProgress(currentTick) > removeCompletionAmount.getValue()
+                    || !InteractionUtil.canBreak(entry.getKey(), state)) {
+                iterator.remove();
+            }
+        }
+
+        if (useDoubleminePrediction.getValue()) {
+            Map<Player, List<BlockBreak>> playerBreakingBlocks = breakStartTimes.values().stream()
+                    .sorted(Comparator.comparingDouble(blockBreak -> blockBreak.startTick))
+                    .filter(blockBreak -> blockBreak.entity instanceof Player)
+                    .collect(Collectors.groupingBy(blockBreak -> (Player) blockBreak.entity, Collectors.toList()));
+
+            for (Map.Entry<Player, List<BlockBreak>> entry : playerBreakingBlocks.entrySet()) {
+                entry.getValue().forEach(x -> x.isRebreak = false);
+
+                if (entry.getValue().size() >= 2) {
+                    entry.getValue().getLast().isRebreak = true;
+                }
+            }
+        }
+
+        if (!render.getValue()) return;
+
+        for (Map.Entry<BlockPos, BlockBreak> entry : breakStartTimes.entrySet()) {
+            if (ignoreFriends.getValue() && entry.getValue().entity instanceof Player player
+                    && Homovore.friendManager.isFriend(player)) {
                 continue;
             }
-            if (ignoreFriends.getValue() && entry.entity instanceof Player player && Homovore.friendManager.isFriend(player)) {
-                it.remove();
-                continue;
-            }
 
-            double progress = (entry.stage + 1) / 10.0;
-
-            AABB box = shrunkBox(pos, state, progress);
-            RenderUtil.drawBoxFilled(event.getMatrix(), box, sideColor.getValue());
-            RenderUtil.drawBox(event.getMatrix(), box, lineColor.getValue(), lineWidth.getValue());
+            entry.getValue().renderBlock(event, currentTick);
         }
     }
 
-    private AABB shrunkBox(BlockPos pos, BlockState state, double progress) {
-        VoxelShape shape = state.getShape(mc.level, pos);
-        AABB base = shape.isEmpty() ? new AABB(BlockPos.ZERO) : shape.bounds();
-        double scale = Math.clamp(progress / completion.getValue(), 0.0, 1.0);
-
-        double cx = (base.minX + base.maxX) / 2.0;
-        double cy = (base.minY + base.maxY) / 2.0;
-        double cz = (base.minZ + base.maxZ) / 2.0;
-        double hw = (base.maxX - base.minX) / 2.0 * scale;
-        double hh = (base.maxY - base.minY) / 2.0 * scale;
-        double hd = (base.maxZ - base.minZ) / 2.0 * scale;
-
-        return new AABB(cx - hw, cy - hh, cz - hd, cx + hw, cy + hh, cz + hd)
-            .move(pos.getX(), pos.getY(), pos.getZ());
+    private double currentTick(float partialTick) {
+        return mc.level.getGameTime() + partialTick;
     }
 
-    private static class BreakEntry {
-        final BlockPos pos;
-        final double startTick;
-        Entity entity;
-        int stage;
-        long lastUpdate;
+    private class BlockBreak {
+        private final BlockPos blockPos;
+        private final double startTick;
+        private final Entity entity;
+        private boolean isRebreak;
 
-        BreakEntry(BlockPos pos, double startTick) {
-            this.pos = pos;
+        private BlockBreak(BlockPos blockPos, double startTick, Entity entity) {
+            this.blockPos = blockPos;
             this.startTick = startTick;
+            this.entity = entity;
+        }
+
+        private void renderBlock(Render3DEvent event, double currentTick) {
+            BlockState state = mc.level.getBlockState(blockPos);
+            VoxelShape shape = state.getShape(mc.level, blockPos);
+            AABB orig = shape.isEmpty() ? new AABB(0, 0, 0, 1, 1, 1) : shape.bounds();
+
+            double completion = isRebreak ? rebreakCompletionAmount.getValue() : completionAmount.getValue();
+            double scale = completion <= 0.0 ? 1.0 : Math.clamp(getBreakProgress(currentTick) / completion, 0.0, 1.0);
+
+            double cx = (orig.minX + orig.maxX) * 0.5;
+            double cy = (orig.minY + orig.maxY) * 0.5;
+            double cz = (orig.minZ + orig.maxZ) * 0.5;
+            double hx = (orig.maxX - orig.minX) * 0.5 * scale;
+            double hy = (orig.maxY - orig.minY) * 0.5 * scale;
+            double hz = (orig.maxZ - orig.minZ) * 0.5 * scale;
+
+            AABB box = new AABB(cx - hx, cy - hy, cz - hz, cx + hx, cy + hy, cz + hz)
+                    .move(blockPos.getX(), blockPos.getY(), blockPos.getZ());
+
+            RenderUtil.drawBoxFilled(event.getMatrix(), box, sideColor.getValue());
+            RenderUtil.drawBox(event.getMatrix(), box, lineColor.getValue(), lineWidth.getValue());
+        }
+
+        private double getBreakProgress(double currentTick) {
+            BlockState state = mc.level.getBlockState(blockPos);
+            int slot = InteractionUtil.fastestToolSlot(state);
+            double breakingSpeed = InteractionUtil.rawMiningSpeed(slot, state, mc.player.onGround());
+
+            return InteractionUtil.breakDelta(breakingSpeed, state) * (currentTick - startTick);
         }
     }
 }

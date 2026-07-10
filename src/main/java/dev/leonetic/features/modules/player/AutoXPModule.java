@@ -30,7 +30,7 @@ public class AutoXPModule extends Module {
     private final Setting<Integer> minThreshold = num("MinThreshold", 30, 1, 100);
     private final Setting<Integer> maxThreshold = num("MaxThreshold", 80, 1, 100);
 
-    private static final int THROWS_PER_BATCH = 9;
+    private static final int THROWS_PER_BATCH = 6;
     private static final long BATCH_INTERVAL_MS = 300;
 
     private boolean throwing;
