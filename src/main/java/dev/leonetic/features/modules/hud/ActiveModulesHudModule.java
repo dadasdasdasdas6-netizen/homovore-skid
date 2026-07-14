@@ -21,6 +21,7 @@ public class ActiveModulesHudModule extends HudModule implements Jsonable {
 
     private static final int STACK_GAP = 2;
     private static final int GRAY = 0xFFAAAAAA;
+    private static final int GLOW_COLOR = 0x8800FF00; // Semi-transparent green glow
 
     private static ActiveModulesHudModule INSTANCE;
 
@@ -85,17 +86,37 @@ public class ActiveModulesHudModule extends HudModule implements Jsonable {
             int x = lineX(pos, width);
 
             int nameColor = module.isEnabled() ? activeColor : GRAY;
+            
+            // Draw glow effect for display name
+            drawGlow(ctx, display, x, y, GLOW_COLOR);
             ctx.drawString(mc.font, display, x, y, nameColor);
+            
             int cursor = x + mc.font.width(display);
             if (!meta.isEmpty()) {
+                // Draw glow effect for meta
+                drawGlow(ctx, meta, cursor, y, GLOW_COLOR);
                 ctx.drawString(mc.font, meta, cursor, y, GRAY);
                 cursor += mc.font.width(meta);
             }
             if (!suffix.isEmpty()) {
+                // Draw glow effect for suffix
+                drawGlow(ctx, suffix, cursor, y, GLOW_COLOR);
                 ctx.drawString(mc.font, suffix, cursor, y, activeColor);
             }
 
             y += mc.font.lineHeight;
+        }
+    }
+
+    /**
+     * Draw a glow effect around text by rendering it offset multiple times
+     */
+    private void drawGlow(GuiGraphics ctx, String text, int x, int y, int glowColor) {
+        for (int ox = -2; ox <= 2; ox++) {
+            for (int oy = -2; oy <= 2; oy++) {
+                if (ox == 0 && oy == 0) continue; // Skip center, that's the main text
+                ctx.drawString(mc.font, text, x + ox, y + oy, glowColor);
+            }
         }
     }
 
