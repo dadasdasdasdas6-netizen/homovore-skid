@@ -2,6 +2,7 @@ package dev.leonetic.features.modules.hud;
 
 import dev.leonetic.event.impl.render.Render2DEvent;
 import dev.leonetic.features.modules.client.HudModule;
+import dev.leonetic.util.render.RenderUtil;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.network.chat.Component;
 import net.minecraft.tags.FluidTags;
@@ -38,6 +39,11 @@ public class NotifierHudModule extends HudModule {
     private static final String OPEN = "<< ";
     private static final String SEP = " ";
     private static final String CLOSE = " >>";
+    
+    // Glow effect parameters
+    private static final int GLOW_RADIUS = 2;
+    private static final int GLOW_ALPHA = 60;
+    private static final int GLOW_PADDING = 4;
 
     private static final class Entry {
         final String key;
@@ -117,6 +123,15 @@ public class NotifierHudModule extends HudModule {
 
         int text = applyAlpha(TEXT_COLOR, alpha);
         int iconColor = applyAlpha(e.icon.color, alpha);
+        
+        // Calculate glow bounds with padding
+        int glowX1 = x - GLOW_PADDING;
+        int glowY1 = y - GLOW_PADDING;
+        int glowX2 = x + width + GLOW_PADDING;
+        int glowY2 = y + mc.font.lineHeight + GLOW_PADDING;
+        
+        // Render glow outline with icon color
+        RenderUtil.shadow(ctx, glowX1, glowY1, glowX2, glowY2, GLOW_RADIUS, (int)(GLOW_ALPHA * alpha));
 
         ctx.drawString(mc.font, OPEN, x, y, text, true);
         x += mc.font.width(OPEN);
