@@ -102,7 +102,8 @@ public class AutoCrystalModule extends Module {
     private final Setting<Double>  pulseExpand   = num("PulseExpand", 0.35, 0.0, 1.0).setPage("Render");
 
     private BlockPos renderPos = null;
-    private long     renderStartMs = 0L;
+    private long     renderStartNanos = 0L;
+    private long     smoothUpdateNanos = 0L;
     private AABB     smoothBox = null;
 
     private enum RenderMode { NONE, GRADIENT, GRADIENT_SMOOTH, BOX_SMOOTH, PULSE }
@@ -118,6 +119,8 @@ public class AutoCrystalModule extends Module {
     private static final long PLACE_PENDING_MS = 40;
 
     private static final long CRYSTAL_TRACK_MS = 1750;
+    private static final double SMOOTH_REFERENCE_FPS = 60.0;
+    private static final double SMOOTH_SNAP_EPSILON = 1.0e-4;
 
     private final Timer placeTimer  = new Timer();
     private final Timer breakTimer  = new Timer();
@@ -176,6 +179,7 @@ public class AutoCrystalModule extends Module {
         lastReactorPlaceTick = -1;
         pendingSwapHandle = null;
         resetDiag();
+        clearRender();
         Homovore.placementManager.addListener(placementListener);
     }
 
@@ -191,55 +195,108 @@ public class AutoCrystalModule extends Module {
         lastBestDamage = 0;
         lastPlaceAir = null;
         resetDiag();
-        renderPos = null;
-        smoothBox = null;
+        clearRender();
     }
 
     private void markRender(BlockPos crystalPos) {
-        if (renderMode.getValue() == RenderMode.NONE) return;
+        RenderMode mode = renderMode.getValue();
+        if (mode == RenderMode.NONE) return;
+
+        long now = System.nanoTime();
+        if (!isSmoothMode(mode) || renderPos == null || renderStartNanos == 0L
+                || now - renderStartNanos >= renderLifeNanos()) {
+            resetSmoothAnimation();
+        }
+
         renderPos = crystalPos;
-        renderStartMs = System.currentTimeMillis();
+        renderStartNanos = now;
     }
 
     @Override
     public void onRender3D(Render3DEvent event) {
-        if (nullCheck() || renderMode.getValue() == RenderMode.NONE || renderPos == null) return;
+        if (nullCheck()) return;
 
-        long elapsed = System.currentTimeMillis() - renderStartMs;
-        long life = renderTime.getValue() * 50L;
-        if (elapsed > life) {
-            renderPos = null;
-            smoothBox = null;
+        RenderMode mode = renderMode.getValue();
+        if (mode == RenderMode.NONE) {
+            clearRender();
+            return;
+        }
+        if (renderPos == null) return;
+
+        long now = System.nanoTime();
+        long elapsedNanos = now - renderStartNanos;
+        long lifeNanos = renderLifeNanos();
+        if (elapsedNanos >= lifeNanos) {
+            clearRender();
             return;
         }
 
-        switch (renderMode.getValue()) {
-            case GRADIENT        -> drawGradient(event, false);
-            case GRADIENT_SMOOTH -> drawGradient(event, true);
-            case BOX_SMOOTH      -> drawBoxSmooth(event);
-            case PULSE           -> drawPulse(event, elapsed, life);
+        if (!isSmoothMode(mode)) {
+            resetSmoothAnimation();
+        }
+
+        switch (mode) {
+            case GRADIENT        -> drawGradient(event, false, now);
+            case GRADIENT_SMOOTH -> drawGradient(event, true, now);
+            case BOX_SMOOTH      -> drawBoxSmooth(event, now);
+            case PULSE           -> drawPulse(event, elapsedNanos / 1_000_000L,
+                    lifeNanos / 1_000_000L);
             default -> { }
         }
     }
 
-    private void updateSmoothBox(AABB target) {
-        if (smoothBox == null) {
-            smoothBox = target;
-        } else {
-            double f = 1.0 / smoothness.getValue();
-            smoothBox = new AABB(
-                    lerp(smoothBox.minX, target.minX, f), lerp(smoothBox.minY, target.minY, f), lerp(smoothBox.minZ, target.minZ, f),
-                    lerp(smoothBox.maxX, target.maxX, f), lerp(smoothBox.maxY, target.maxY, f), lerp(smoothBox.maxZ, target.maxZ, f));
-        }
+    private long renderLifeNanos() {
+        return renderTime.getValue() * 50_000_000L;
     }
 
-    private void drawBoxSmooth(Render3DEvent event) {
-        updateSmoothBox(new AABB(renderPos.below()));
+    private static boolean isSmoothMode(RenderMode mode) {
+        return mode == RenderMode.GRADIENT_SMOOTH || mode == RenderMode.BOX_SMOOTH;
+    }
+
+    private void clearRender() {
+        renderPos = null;
+        renderStartNanos = 0L;
+        resetSmoothAnimation();
+    }
+
+    private void resetSmoothAnimation() {
+        smoothBox = null;
+        smoothUpdateNanos = 0L;
+    }
+
+    private void updateSmoothBox(AABB target, long now) {
+        if (smoothBox == null || smoothUpdateNanos == 0L) {
+            smoothBox = target;
+            smoothUpdateNanos = now;
+            return;
+        }
+
+        double deltaSeconds = Math.max(0.0, (now - smoothUpdateNanos) / 1_000_000_000.0);
+        smoothUpdateNanos = now;
+
+        int value = smoothness.getValue();
+        double factor = value <= 1
+                ? 1.0
+                : 1.0 - Math.pow(1.0 - 1.0 / value, deltaSeconds * SMOOTH_REFERENCE_FPS);
+
+        smoothBox = new AABB(
+                lerp(smoothBox.minX, target.minX, factor), lerp(smoothBox.minY, target.minY, factor), lerp(smoothBox.minZ, target.minZ, factor),
+                lerp(smoothBox.maxX, target.maxX, factor), lerp(smoothBox.maxY, target.maxY, factor), lerp(smoothBox.maxZ, target.maxZ, factor));
+
+        double maxError = Math.max(
+                Math.max(Math.abs(smoothBox.minX - target.minX), Math.abs(smoothBox.minY - target.minY)),
+                Math.max(Math.max(Math.abs(smoothBox.minZ - target.minZ), Math.abs(smoothBox.maxX - target.maxX)),
+                        Math.max(Math.abs(smoothBox.maxY - target.maxY), Math.abs(smoothBox.maxZ - target.maxZ))));
+        if (maxError <= SMOOTH_SNAP_EPSILON) smoothBox = target;
+    }
+
+    private void drawBoxSmooth(Render3DEvent event, long now) {
+        updateSmoothBox(new AABB(renderPos.below()), now);
         RenderUtil.drawBoxFilled(event.getMatrix(), smoothBox, sideColor.getValue());
         RenderUtil.drawBox(event.getMatrix(), smoothBox, lineColor.getValue(), lineWidth.getValue());
     }
 
-    private void drawGradient(Render3DEvent event, boolean smooth) {
+    private void drawGradient(Render3DEvent event, boolean smooth, long now) {
         Color side = sideColor.getValue();
         Color line = lineColor.getValue();
         Color clear = new Color(side.getRed(), side.getGreen(), side.getBlue(), 0);
@@ -250,7 +307,7 @@ public class AutoCrystalModule extends Module {
 
         double x1, z1, x2, z2, yTop;
         if (smooth) {
-            updateSmoothBox(new AABB(basePos));
+            updateSmoothBox(new AABB(basePos), now);
             x1 = smoothBox.minX; z1 = smoothBox.minZ;
             x2 = smoothBox.maxX; z2 = smoothBox.maxZ;
             yTop = smoothBox.maxY;
