@@ -1,0 +1,107 @@
+package dev.leonetic.features.modules.client;
+
+import dev.leonetic.Homovore;
+import dev.leonetic.event.impl.render.Render2DEvent;
+import dev.leonetic.event.system.Subscribe;
+import dev.leonetic.features.modules.Module;
+import dev.leonetic.features.settings.Setting;
+import net.minecraft.client.gui.Font;
+import net.minecraft.client.gui.GuiGraphics;
+
+import java.awt.Color;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+public class KittyGodHudModule extends Module {
+
+    public enum Side { LEFT, RIGHT }
+    public enum SortMode { LENGTH, ALPHABETICAL }
+
+    private final Setting<Boolean> watermark = bool("Watermark", true);
+    private final Setting<Side> side = mode("Side", Side.RIGHT);
+    private final Setting<SortMode> sortMode = mode("Sort", SortMode.LENGTH);
+    private final Setting<Color> accentColor = color("AccentColor", 155, 155, 155, 255);
+    private final Setting<Color> textColor = color("TextColor", 255, 255, 255, 255);
+
+    public KittyGodHudModule() {
+        super("KittyGodHUD", "Renders the kittygod.cc style HUD and ArrayList.", Category.CLIENT);
+    }
+
+    @Subscribe
+    private void onRender2D(Render2DEvent event) {
+        if (nullCheck()) return;
+        
+        GuiGraphics graphics = event.getGuiGraphics();
+        Font font = mc.font;
+        
+        int screenWidth = mc.getWindow().getGuiScaledWidth();
+        
+        // 1. Draw Watermark
+        if (watermark.getValue()) {
+            String text = "kittygod.cc";
+            if (side.getValue() == Side.LEFT) {
+                graphics.drawString(font, text, 2, 2, accentColor.getValue().getRGB(), true);
+            } else {
+                int x = screenWidth - font.width(text) - 2;
+                graphics.drawString(font, text, x, 2, accentColor.getValue().getRGB(), true);
+            }
+        }
+        
+        // 2. Draw ArrayList
+        List<Module> modules = new ArrayList<>();
+        for (Module module : Homovore.moduleManager.getModules()) {
+            if (module.isEnabled() && !module.isHidden()) {
+                modules.add(module);
+            }
+        }
+        
+        if (sortMode.getValue() == SortMode.LENGTH) {
+            // Sort by longest text width first (creates the staircase)
+            modules.sort(Comparator.comparingInt((Module m) -> getModuleWidth(font, m)).reversed());
+        } else {
+            // Sort alphabetically (creates a straight block)
+            modules.sort(Comparator.comparing(Module::getName));
+        }
+        
+        // Start Y is below the watermark if it's enabled
+        int y = watermark.getValue() ? font.lineHeight + 1 : 2;
+        int accent = accentColor.getValue().getRGB();
+        int textCol = textColor.getValue().getRGB();
+        
+        for (Module module : modules) {
+            String name = module.getName();
+            String info = module.getDisplayInfo();
+            String infoStr = (info != null && !info.isEmpty()) ? " " + info : "";
+            
+            int nameWidth = font.width(name);
+            int infoWidth = font.width(infoStr);
+            int totalWidth = nameWidth + infoWidth;
+            
+            int x;
+            if (side.getValue() == Side.RIGHT) {
+                // Align to the right edge of the screen
+                x = screenWidth - totalWidth - 2;
+            } else {
+                // Align to the left edge of the screen
+                x = 2;
+            }
+            
+            // Draw module name
+            graphics.drawString(font, name, x, y, textCol, true);
+            
+            // Draw info/suffix in accent color right next to the name
+            if (infoWidth > 0) {
+                graphics.drawString(font, infoStr, x + nameWidth, y, accent, true);
+            }
+            
+            // Move down for the next module (tight spacing, no extra +1 gap)
+            y += font.lineHeight;
+        }
+    }
+
+    private int getModuleWidth(Font font, Module m) {
+        String info = m.getDisplayInfo();
+        return font.width(m.getName() + (info != null && !info.isEmpty() ? " " + info : ""));
+    }
+}
