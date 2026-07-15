@@ -61,6 +61,8 @@ public class AutoMineModule extends Module {
     private final Setting<Boolean> glassPush     = bool("GlassPush", false);
     private final Setting<Integer> glassAttempts = num("GlassAttempts", 2, 1, 5);
 
+    private final Setting<SilentSwapMode> silentSwapMode = mode("SilentSwap", SilentSwapMode.Normal);
+
     private final Setting<Boolean> glassRender = bool("GlassRender", true).setPage("Render");
     private final Setting<Float> glassFadeTime = num("GlassFadeTime", 0.5f, 0.05f, 2.0f).setPage("Render")
             .setVisibility(v -> glassRender.getValue());
@@ -378,6 +380,16 @@ public class AutoMineModule extends Module {
         Result glass = InventoryUtil.find(Items.GLASS, InventoryUtil.PLACE_SCOPE);
         if (!glass.found()) return false;
         if (!PlaceUtil.canPlace(pos)) return false;
+
+        // Use silent swap mode if NoPickaxeSwap is enabled
+        if (silentSwapMode.getValue() == SilentSwapMode.NoPickaxeSwap) {
+            if (!InventoryUtil.swapSilent(glass)) return false;
+            if (!Homovore.placementManager.enqueue(pos, glass.slot())) return false;
+            Homovore.placementManager.flushQueue();
+            InventoryUtil.swapBackSilent(glass);
+            return true;
+        }
+
         if (!Homovore.placementManager.enqueue(pos, glass.slot())) return false;
         Homovore.placementManager.flushQueue();
         return true;
@@ -787,4 +799,6 @@ public class AutoMineModule extends Module {
     private enum AntiSurroundMode { None, Inner, Outer, Auto }
 
     private enum ExtendBreakMode { None, Long, Corner }
+
+    private enum SilentSwapMode { Normal, NoPickaxeSwap }
 }
