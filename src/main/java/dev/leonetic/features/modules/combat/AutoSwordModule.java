@@ -50,8 +50,22 @@ public class AutoSwordModule extends Module {
     private final Setting<Boolean> strict = bool("Strict", true)
             .setVisibility(v -> criticals.getValue());
 
+    // ---- Silent Swap ----
+    private final Setting<Boolean> silentSwap = bool("SilentSwap", false);
+    private final Setting<Boolean> swapBack   = bool("SwapBack", true)
+            .setVisibility(v -> silentSwap.getValue());
+    private final Setting<Integer> swapBackDelay = num("SwapBackDelay", 2, 0, 20)
+            .setVisibility(v -> silentSwap.getValue() && swapBack.getValue());
+
     private Entity currentTarget = null;
     private float attackCooldownTicks = 0f;
+
+    // ---- Silent Swap state ----
+    private boolean isSilentSwapped = false;
+    private int originalSlot = -1;
+    private int silentWeaponSlot = -1;
+    private int swapBackTicks = -1;
+    private SwapManager.SwapHandle silentHandle = null;
 
     public AutoSwordModule() {
         super("AutoSword", "Automatically attacks nearby players with the best weapon.", Category.COMBAT);
@@ -61,11 +75,21 @@ public class AutoSwordModule extends Module {
     public void onDisable() {
         currentTarget = null;
         attackCooldownTicks = 0f;
+        silentSwapBack();
     }
 
     @Subscribe
     private void onPreTick(PreTickEvent event) {
         if (nullCheck() || mc.player.isDeadOrDying()) return;
+
+        if (swapBackTicks >= 0) {
+            if (swapBackTicks == 0) {
+                silentSwapBack();
+                swapBackTicks = -1;
+            } else {
+                swapBackTicks--;
+            }
+        }
 
         float tps;
         switch (tpsMode.getValue()) {
@@ -114,8 +138,8 @@ public class AutoSwordModule extends Module {
         ItemStack weaponStack = mc.player.getInventory().getItem(weaponSlot);
         boolean doCrit = shouldCrit(weaponStack);
 
-        int originalSlot = Homovore.swapManager.serverSlot();
-        boolean needSwap = weaponSlot != originalSlot;
+        int currentServerSlot = isSilentSwapped ? silentWeaponSlot : Homovore.swapManager.serverSlot();
+        boolean needSwap = weaponSlot != currentServerSlot;
 
         if (needSwap && mc.player.isUsingItem()
                 && mc.player.getUsedItemHand() == InteractionHand.MAIN_HAND) {
@@ -125,16 +149,20 @@ public class AutoSwordModule extends Module {
         OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
         if (needSwap && offhand != null && offhand.shouldDeferForEat()) return;
 
-        SwapManager.SwapHandle handle = null;
-        if (needSwap) {
-            handle = Homovore.swapManager.acquire("AutoSword", 70);
-            if (handle == null) return;
-        }
-
-        try {
+        if (silentSwap.getValue()) {
             if (needSwap) {
+                if (silentHandle == null) {
+                    silentHandle = Homovore.swapManager.acquire("AutoSword", 70);
+                    if (silentHandle == null) return;
+                }
+                if (!isSilentSwapped) {
+                    originalSlot = currentServerSlot;
+                }
+                silentWeaponSlot = weaponSlot;
+                isSilentSwapped = true;
                 mc.getConnection().send(new ServerboundSetCarriedItemPacket(weaponSlot));
             }
+            swapBackTicks = -1; // Cancel any pending swap back since we are attacking
 
             if (doCrit) {
                 double x = mc.player.getX(), y = mc.player.getY(), z = mc.player.getZ();
@@ -147,14 +175,65 @@ public class AutoSwordModule extends Module {
             mc.gameMode.attack(mc.player, currentTarget);
             if (swing.getValue()) mc.player.swing(InteractionHand.MAIN_HAND);
 
-            if (needSwap) {
-                mc.getConnection().send(new ServerboundSetCarriedItemPacket(originalSlot));
+            if (swapBack.getValue()) {
+                swapBackTicks = swapBackDelay.getValue();
             }
-        } finally {
-            if (handle != null) Homovore.swapManager.release(handle);
+        } else {
+            SwapManager.SwapHandle handle = null;
+            if (needSwap) {
+                handle = Homovore.swapManager.acquire("AutoSword", 70);
+                if (handle == null) return;
+            }
+
+            try {
+                if (needSwap) {
+                    mc.getConnection().send(new ServerboundSetCarriedItemPacket(weaponSlot));
+                }
+
+                if (doCrit) {
+                    double x = mc.player.getX(), y = mc.player.getY(), z = mc.player.getZ();
+                    boolean hc = mc.player.horizontalCollision;
+                    mc.getConnection().send(new ServerboundMovePlayerPacket.PosRot(x, y,          z, serverYaw, serverPitch, mc.player.onGround(), hc));
+                    mc.getConnection().send(new ServerboundMovePlayerPacket.PosRot(x, y + 0.0625, z, serverYaw, serverPitch, false,                 hc));
+                    mc.getConnection().send(new ServerboundMovePlayerPacket.PosRot(x, y + 0.045,  z, serverYaw, serverPitch, false,                 hc));
+                }
+
+                mc.gameMode.attack(mc.player, currentTarget);
+                if (swing.getValue()) mc.player.swing(InteractionHand.MAIN_HAND);
+
+                if (needSwap) {
+                    mc.getConnection().send(new ServerboundSetCarriedItemPacket(currentServerSlot));
+                }
+            } finally {
+                if (handle != null) Homovore.swapManager.release(handle);
+            }
         }
 
         attackCooldownTicks = getBaseCooldownTicks(weaponStack, tps) * delay.getValue().floatValue();
+    }
+
+    private void silentSwapBack() {
+        if (!isSilentSwapped) return;
+        if (mc.player == null || mc.player.connection == null) {
+            isSilentSwapped = false;
+            originalSlot = -1;
+            silentWeaponSlot = -1;
+            if (silentHandle != null) {
+                Homovore.swapManager.release(silentHandle);
+                silentHandle = null;
+            }
+            return;
+        }
+        if (originalSlot >= 0 && originalSlot < 9) {
+            mc.getConnection().send(new ServerboundSetCarriedItemPacket(originalSlot));
+        }
+        isSilentSwapped = false;
+        originalSlot = -1;
+        silentWeaponSlot = -1;
+        if (silentHandle != null) {
+            Homovore.swapManager.release(silentHandle);
+            silentHandle = null;
+        }
     }
 
     @Override
