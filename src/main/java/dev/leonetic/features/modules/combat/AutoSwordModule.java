@@ -82,6 +82,7 @@ public class AutoSwordModule extends Module {
     private void onPreTick(PreTickEvent event) {
         if (nullCheck() || mc.player.isDeadOrDying()) return;
 
+        // Tick silent swap timer
         if (swapBackTicks >= 0) {
             if (swapBackTicks == 0) {
                 silentSwapBack();
@@ -109,6 +110,12 @@ public class AutoSwordModule extends Module {
                 currentTarget = null;
                 return;
             }
+        }
+
+        // Defer to AutoMine if it is currently silent swapping, exactly like AuraModule
+        AutoMineModule autoMine = Homovore.moduleManager.getModuleByClass(AutoMineModule.class);
+        if (silentSwap.getValue() && autoMine != null && autoMine.isEnabled() && autoMine.isSilentSwapping()) {
+            return;
         }
 
         currentTarget = findTarget();
