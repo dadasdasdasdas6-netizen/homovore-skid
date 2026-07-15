@@ -89,7 +89,7 @@ public class ScaffoldModule extends Module {
         candidates.sort(Comparator.comparingDouble(p -> eye.distanceToSqr(Vec3.atCenterOf(p))));
 
         long now = System.currentTimeMillis();
-        for (BlockPos pos : Homovore.placementManager.placeBatchOffhand(candidates, slot)) {
+        for (BlockPos pos : Homovore.placementManager.placeBatch(candidates, slot)) {
             renderMap.put(pos, now);
         }
 

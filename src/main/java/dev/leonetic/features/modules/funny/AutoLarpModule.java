@@ -1,4 +1,4 @@
-package dev.leonetic.features.modules.misc;
+package dev.leonetic.features.modules.funny;
 
 import dev.leonetic.event.impl.entity.player.PreTickEvent;
 import dev.leonetic.event.system.Subscribe;
@@ -10,7 +10,7 @@ import java.util.Random;
 
 public class AutoLarpModule extends Module {
 
-    private final Setting<String> messages = str("Messages", 
+    private final Setting<String> messages = str("Messages",
             "your poor g," +
             "show funds g," +
             "band for band g," +
@@ -35,22 +35,20 @@ public class AutoLarpModule extends Module {
             "sitting on 10k g," +
             "i got the stash g," +
             "let me see your bank g," +
-            "poor kid g", 
-            "Comma-separated list of messages to LARP");
+            "poor kid g");
             
-    private final Setting<Integer> delay = num("Delay", 15, 1, 120, "Delay in seconds between messages");
-    private final Setting<Boolean> antiSpam = bool("AntiSpam", true, "Appends random characters to bypass chat spam filters");
+    private final Setting<Integer> delay = num("Delay", 15, 1, 120);
+    private final Setting<Boolean> antiSpam = bool("AntiSpam", true);
 
     private long lastMessageTime = 0L;
     private final Random random = new Random();
 
     public AutoLarpModule() {
-        super("AutoLarp", "Automatically LARPs in chat about having bands and funds.", Category.MISC);
+        super("AutoLarp", "Automatically LARPs in chat about having bands and funds.", Category.FUNNY);
     }
 
     @Override
     public void onEnable() {
-        super.onEnable();
         lastMessageTime = System.currentTimeMillis();
     }
 

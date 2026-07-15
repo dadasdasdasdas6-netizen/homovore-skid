@@ -8,6 +8,7 @@ import dev.leonetic.features.gui.items.TextBox;
 import dev.leonetic.util.render.GuiFade;
 import dev.leonetic.features.gui.items.buttons.ModuleButton;
 import dev.leonetic.features.modules.Module;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.CharacterEvent;
@@ -126,7 +127,14 @@ public class HomovoreGui extends Screen {
     }
 
     public static float getScale() {
-        return 1f;
+        if (INSTANCE == null || INSTANCE.widgets.isEmpty()) return 1f;
+
+        int panelCount = INSTANCE.widgets.size();
+        int panelSpan = panelCount * GuiTheme.PANEL_WIDTH
+                + (panelCount - 1) * GuiTheme.PANEL_SPACING;
+        int viewportWidth = Minecraft.getInstance().getWindow().getGuiScaledWidth();
+        float availableWidth = Math.max(1f, viewportWidth - 12f);
+        return Math.min(1f, availableWidth / panelSpan);
     }
 
     @Override

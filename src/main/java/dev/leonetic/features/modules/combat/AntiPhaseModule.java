@@ -25,7 +25,7 @@ import net.minecraft.world.phys.Vec3;
 
 import java.awt.Color;
 
-public class AntiPhaseModule extends Module {
+public final class AntiPhaseModule extends Module {
 
     private final Setting<Double> range = num("Range", 4.0, 1.0, 6.0);
     private final Setting<Boolean> replaceScaffolding = bool("ReplaceScaffolding", true);
@@ -151,7 +151,7 @@ public class AntiPhaseModule extends Module {
     }
 
     @Subscribe
-    private void onRender3D(Render3DEvent event) {
+    public void onRender3D(Render3DEvent event) {
         if (nullCheck() || !render.getValue() || renderPos == null) return;
 
         long age = System.currentTimeMillis() - renderStart;

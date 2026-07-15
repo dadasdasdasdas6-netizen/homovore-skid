@@ -172,9 +172,10 @@ public class PistonCrystalModule extends Module {
             return;
         if (!Homovore.placementManager.placeDirect(setup.piston(), null, pistonSlot))
             return;
-        if (setup.placeRedstone())
-            Homovore.placementManager.placeDirect(setup.redstone(), null, redstoneSlot);
-        placeCrystal(setup.base(), crystalSlot);
+        if (setup.placeRedstone()
+                && !Homovore.placementManager.placeDirect(setup.redstone(), null, redstoneSlot))
+            return;
+        if (!placeCrystal(setup.base(), crystalSlot)) return;
 
         int tick = mc.player.tickCount;
         if (setup.placeBase())   renderMap.put(setup.base(),    tick);
@@ -190,12 +191,11 @@ public class PistonCrystalModule extends Module {
         delayTicks = 0;
     }
 
-    private void placeCrystal(BlockPos base, int slot) {
+    private boolean placeCrystal(BlockPos base, int slot) {
         if (offhandPlace.getValue()) {
-            Homovore.placementManager.placeCrystalOffhand(base, slot, true);
-        } else {
-            Homovore.placementManager.placeCrystal(base, slot, true);
+            return Homovore.placementManager.placeCrystalOffhand(base, slot, true);
         }
+        return Homovore.placementManager.placeCrystal(base, slot, true);
     }
 
     private void tickActive() {

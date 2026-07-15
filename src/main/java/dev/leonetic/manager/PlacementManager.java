@@ -1,7 +1,7 @@
 package dev.leonetic.manager;
 
 import dev.leonetic.Homovore;
-import dev.leonetic.event.impl.entity.player.TickEvent;
+import dev.leonetic.event.impl.entity.player.PreTickEvent;
 import dev.leonetic.event.impl.network.PacketEvent;
 import dev.leonetic.event.system.Subscribe;
 import dev.leonetic.features.Feature;
@@ -10,8 +10,6 @@ import dev.leonetic.mixin.client.ClientLevelAccessor;
 import dev.leonetic.util.MathUtil;
 import dev.leonetic.util.PlaceUtil;
 import dev.leonetic.util.inventory.InventoryUtil;
-import dev.leonetic.util.inventory.Result;
-import dev.leonetic.util.inventory.ResultType;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.Packet;
@@ -39,16 +37,15 @@ import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.LeverBlock;
 import net.minecraft.world.level.block.NoteBlock;
 import net.minecraft.world.level.block.TrapDoorBlock;
-import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +55,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 public class PlacementManager extends Feature {
+
+    private static final String ROTATION_ID = "PlacementManager.place";
+    private static final int ROTATION_PRIORITY = 90;
 
     private static final int  WINDOW_LIMIT = 9;
     private static final long WINDOW_MS    = 300;
@@ -71,11 +71,21 @@ public class PlacementManager extends Feature {
     private final Queue<PlacementTask> queue    = new ArrayDeque<>();
     private final Set<BlockPos>        queued   = new HashSet<>();
 
+    @Nullable
+    private PendingPlacement pendingPlacement;
+
+    @Nullable
+    private DeferredRestore deferredRestore;
+
+    private final Map<BlockPos, Long> directCompletions = new ConcurrentHashMap<>();
+
     private boolean placing = false;
 
     private boolean wasUsingItem = false;
 
     private int lastSwapSequenceTick = -1;
+
+    private int lastNormalPlacementTick = -1;
 
     private boolean swapSequenceAvailable() {
         return mc.player == null || mc.player.tickCount != lastSwapSequenceTick;
@@ -124,15 +134,21 @@ public class PlacementManager extends Feature {
     }
 
     public boolean enqueue(BlockPos pos, int hotbarSlot) {
-        if (isOnCooldown(pos)) return false;
-        if (!queued.add(pos)) return false;
-        return queue.offer(new PlacementTask(pos, null, hotbarSlot));
+        return enqueueTask(pos, null, hotbarSlot, false);
     }
 
     public boolean enqueue(BlockPos pos, Direction face, int hotbarSlot) {
+        return enqueueTask(pos, face, hotbarSlot, false);
+    }
+
+    private boolean enqueueTask(BlockPos pos, @Nullable Direction face, int hotbarSlot, boolean direct) {
+        if (pos == null || hotbarSlot < 0 || hotbarSlot > 35) return false;
         if (isOnCooldown(pos)) return false;
-        if (!queued.add(pos)) return false;
-        return queue.offer(new PlacementTask(pos, face, hotbarSlot));
+        BlockPos immutable = pos.immutable();
+        if (!queued.add(immutable)) return false;
+        boolean accepted = queue.offer(new PlacementTask(immutable, face, hotbarSlot, direct));
+        if (!accepted) queued.remove(immutable);
+        return accepted;
     }
 
     private boolean isOnCooldown(BlockPos pos) {
@@ -148,6 +164,8 @@ public class PlacementManager extends Feature {
     public void clearQueue() {
         queue.clear();
         queued.clear();
+        directCompletions.clear();
+        cancelPendingPlacement();
     }
 
     public void removeQueuedFor(java.util.function.Predicate<BlockPos> filter) {
@@ -158,6 +176,10 @@ public class PlacementManager extends Feature {
             }
             return false;
         });
+        if (pendingPlacement != null && filter.test(pendingPlacement.task.pos())) {
+            queued.remove(pendingPlacement.task.pos());
+            cancelPendingPlacement();
+        }
     }
 
     public void forceResetPlaceCooldown(BlockPos pos) {
@@ -165,7 +187,7 @@ public class PlacementManager extends Feature {
     }
 
     public boolean hasPending() {
-        return !queue.isEmpty();
+        return !queue.isEmpty() || pendingPlacement != null || deferredRestore != null;
     }
 
     public boolean isPlacing() {
@@ -173,10 +195,27 @@ public class PlacementManager extends Feature {
     }
 
     @Subscribe
-    private void onTick(TickEvent event) {
-        if (nullCheck()) { wasUsingItem = false; return; }
-        flushQueue();
+    private void onPreTick(PreTickEvent event) {
+        if (nullCheck()) {
+            wasUsingItem = false;
+            queue.clear();
+            queued.clear();
+            directCompletions.clear();
+            if (Homovore.rotationManager != null) Homovore.rotationManager.cancel(ROTATION_ID);
+            pendingPlacement = null;
+            deferredRestore = null;
+            lastNormalPlacementTick = -1;
+            lastSwapSequenceTick = -1;
+            return;
+        }
 
+        if (deferredRestore != null) {
+            if (restoreDeferred(deferredRestore)) deferredRestore = null;
+            wasUsingItem = mc.player.isUsingItem();
+            return;
+        }
+
+        driveQueue();
         wasUsingItem = mc.player.isUsingItem();
     }
 
@@ -185,165 +224,115 @@ public class PlacementManager extends Feature {
     }
 
     public void flushQueue() {
-        if (nullCheck()) return;
-
-        long now = System.currentTimeMillis();
-        while (!recentPlacements.isEmpty() && now - recentPlacements.peekFirst() >= WINDOW_MS) {
-            recentPlacements.pollFirst();
-        }
-
-        if (usingItemAnyTick()) return;
-
-        OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
-        if (offhand != null && offhand.shouldDeferForEat()) return;
-
-        if (!swapSequenceAvailable()) return;
-
-        int budget = WINDOW_LIMIT - recentPlacements.size();
-        if (budget <= 0) return;
-
-        List<PreparedClick> ready = new ArrayList<>();
-        List<PlacementTask> deferred = new ArrayList<>();
-        int burstSlot = -1;
-        while (ready.size() < budget && !queue.isEmpty()) {
-            PlacementTask task = queue.poll();
-            if (burstSlot != -1 && task.hotbarSlot() != burstSlot) {
-                deferred.add(task);
-                continue;
-            }
-            queued.remove(task.pos());
-            PreparedClick prepared = prepareClick(task);
-            if (prepared != null) {
-                ready.add(prepared);
-                burstSlot = task.hotbarSlot();
-            }
-        }
-        for (PlacementTask task : deferred) queue.offer(task);
-        if (ready.isEmpty()) return;
-
-        boolean sent = false;
-        placing = true;
-        try {
-            int originalSlot = InventoryUtil.selected();
-            int useSlot = altSwapIn(burstSlot);
-            if (useSlot >= 0) {
-                try {
-                    sendBurst(ready, useSlot, originalSlot);
-                    if (useSlot != originalSlot) {
-                        mc.getConnection().send(new ServerboundSetCarriedItemPacket(originalSlot));
-                    }
-                    sent = true;
-                } finally {
-                    altSwapOut(burstSlot, useSlot);
-                }
-            }
-        } finally {
-            placing = false;
-        }
-        if (!sent) return;
-        markSwapSequenceUsed();
-
-        long stamp = System.currentTimeMillis();
-        for (PreparedClick p : ready) {
-            sentAt.put(p.pos(), stamp);
-            recentPlacements.addLast(stamp);
-        }
+        // Compatibility hook only. The queue is intentionally driven from
+        // PreTickEvent so no ordinary placement can run after sendPosition.
     }
 
-    public List<BlockPos> placeBatchOffhand(List<BlockPos> positions, int hotbarSlot) {
+    public List<BlockPos> placeBatch(List<BlockPos> positions, int hotbarSlot) {
         if (nullCheck() || positions.isEmpty()) return List.of();
+        java.util.ArrayList<BlockPos> accepted = new java.util.ArrayList<>();
+        for (BlockPos pos : positions) {
+            if (enqueue(pos, hotbarSlot)) accepted.add(pos.immutable());
+        }
+        return accepted;
+    }
 
+    private void driveQueue() {
+        prunePlacementWindow();
+        long now = System.currentTimeMillis();
+        directCompletions.entrySet().removeIf(e -> now - e.getValue() > 1_000L);
+
+        if (lastNormalPlacementTick == mc.player.tickCount) return;
+        if (usingItemAnyTick()) return;
+        OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
+        if (offhand != null && offhand.shouldDeferForEat()) return;
+        if (!swapSequenceAvailable() || Homovore.swapManager.isHotbarBusy()) return;
+        if (recentPlacements.size() >= WINDOW_LIMIT) return;
+
+        if (pendingPlacement == null) {
+            while (!queue.isEmpty()) {
+                PlacementTask task = queue.peek();
+                if (isInventorySlot(task.hotbarSlot()) && inventorySwapUnsafe()) return;
+
+                PreparedClick prepared = prepareClick(task);
+                if (prepared == null) {
+                    queue.poll();
+                    queued.remove(task.pos());
+                    continue;
+                }
+
+                queue.poll();
+                pendingPlacement = new PendingPlacement(task, prepared);
+                submitPlacementRotation(pendingPlacement);
+                return;
+            }
+            return;
+        }
+
+        PendingPlacement pending = pendingPlacement;
+        if (isInventorySlot(pending.task.hotbarSlot()) && inventorySwapUnsafe()) {
+            Homovore.rotationManager.cancel(ROTATION_ID);
+            pending.rotationTick = -1;
+            return;
+        }
+
+        PreparedClick refreshed = prepareClick(pending.task);
+        if (refreshed == null) {
+            queued.remove(pending.task.pos());
+            cancelPendingPlacement();
+            return;
+        }
+        if (!sameClick(pending.click, refreshed)) {
+            pending.click = refreshed;
+            submitPlacementRotation(pending);
+            return;
+        }
+
+        if (pending.rotationTick < 0) {
+            submitPlacementRotation(pending);
+            return;
+        }
+        if (mc.player.tickCount <= pending.rotationTick) return;
+
+        if (!serverRayHits(pending.click)) {
+            submitPlacementRotation(pending);
+            return;
+        }
+        if (!sendNormalPlacement(pending)) return;
+
+        long stamp = System.currentTimeMillis();
+        sentAt.put(pending.click.pos(), stamp);
+        recentPlacements.addLast(stamp);
+        queued.remove(pending.task.pos());
+        if (pending.task.direct()) directCompletions.put(pending.task.pos(), stamp);
+        lastNormalPlacementTick = mc.player.tickCount;
+        markSwapSequenceUsed();
+        Homovore.rotationManager.cancel(ROTATION_ID);
+        pendingPlacement = null;
+    }
+
+    private void submitPlacementRotation(PendingPlacement pending) {
+        float[] angles = MathUtil.calcAngle(mc.player.getEyePosition(1.0f), pending.click.hitPos());
+        Homovore.rotationManager.submit(new RotationRequest(
+                ROTATION_ID, ROTATION_PRIORITY, angles[0], angles[1],
+                RotationRequest.Mode.MOTION, true, true));
+        pending.rotationTick = mc.player.tickCount;
+    }
+
+    private void prunePlacementWindow() {
         long now = System.currentTimeMillis();
         while (!recentPlacements.isEmpty() && now - recentPlacements.peekFirst() >= WINDOW_MS) {
             recentPlacements.pollFirst();
         }
-
-        if (usingItemAnyTick()) return List.of();
-        OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
-        if (offhand != null && offhand.shouldDeferForEat()) return List.of();
-
-        if (!swapSequenceAvailable()) return List.of();
-
-        int budget = WINDOW_LIMIT - recentPlacements.size();
-        if (budget <= 0) return List.of();
-
-        List<PreparedClick> ready = new ArrayList<>();
-        for (BlockPos pos : positions) {
-            if (ready.size() >= budget) break;
-            if (isOnCooldown(pos)) continue;
-            PreparedClick prepared = prepareClick(new PlacementTask(pos, null, hotbarSlot));
-            if (prepared != null) ready.add(prepared);
-        }
-        if (ready.isEmpty()) return List.of();
-
-        boolean sent = false;
-        placing = true;
-        try {
-            int originalSlot = InventoryUtil.selected();
-            int useSlot = altSwapIn(hotbarSlot);
-            if (useSlot >= 0) {
-                try {
-                    sendBurst(ready, useSlot, originalSlot);
-                    if (useSlot != originalSlot) {
-                        mc.getConnection().send(new ServerboundSetCarriedItemPacket(originalSlot));
-                    }
-                    sent = true;
-                } finally {
-                    altSwapOut(hotbarSlot, useSlot);
-                }
-            }
-        } finally {
-            placing = false;
-        }
-        if (!sent) return List.of();
-        markSwapSequenceUsed();
-
-        long stamp = System.currentTimeMillis();
-        List<BlockPos> placed = new ArrayList<>(ready.size());
-        for (PreparedClick p : ready) {
-            sentAt.put(p.pos(), stamp);
-            recentPlacements.addLast(stamp);
-            placed.add(p.pos());
-        }
-        return placed;
     }
 
     @Nullable
     public BlockHitResult prepareAirPlaceHit(BlockPos pos) {
         if (isOnCooldown(pos)) return null;
         if (!PlaceUtil.canPlace(pos)) return null;
-
-        Vec3 eye = mc.player.getEyePosition();
-        Direction bestSide = null;
-        double bestDistSq = Double.MAX_VALUE;
-        for (Direction side : Direction.values()) {
-            BlockPos neighbour = pos.relative(side);
-            var state = mc.level.getBlockState(neighbour);
-            if (state.isAir()) continue;
-            if (!state.getFluidState().isEmpty()) continue;
-            if (isInteractable(state.getBlock())) continue;
-
-            Vec3 hit = Vec3.atCenterOf(pos).relative(side, 0.5);
-            Vec3 normal = new Vec3(-side.getStepX(), -side.getStepY(), -side.getStepZ());
-            if (eye.subtract(hit).dot(normal) <= 0.01) continue;
-
-            double distSq = eye.distanceToSqr(hit);
-            if (distSq < bestDistSq) {
-                bestDistSq = distSq;
-                bestSide = side;
-            }
-        }
-
-        if (bestSide != null) {
-            return new BlockHitResult(
-                    Vec3.atCenterOf(pos).relative(bestSide, 0.5),
-                    bestSide.getOpposite(),
-                    pos.relative(bestSide),
-                    false);
-        }
-
-        Direction dir = getAirPlaceDirection(pos);
-        return new BlockHitResult(getAirPlaceHitPos(pos, dir), dir, pos, false);
+        PreparedClick click = findSupportClick(pos, null, -1);
+        if (click == null) return null;
+        return new BlockHitResult(click.hitPos(), click.hitSide(), click.neighbour(), false);
     }
 
     public void notePlacement(BlockPos pos) {
@@ -354,33 +343,13 @@ public class PlacementManager extends Feature {
 
     @Nullable
     public Direction getPlaceSide(BlockPos pos) {
-
-        Vec3 eye = mc.player.getEyePosition();
-        double bestDistSq = Double.MAX_VALUE;
-        Direction bestSide = null;
-
-        for (Direction side : Direction.values()) {
-            BlockPos neighbour = pos.relative(side);
-            var neighborState = mc.level.getBlockState(neighbour);
-
-            if (neighborState.isAir()) continue;
-            if (!neighborState.getFluidState().isEmpty()) continue;
-            if (isInteractable(neighborState.getBlock())) continue;
-
-            double dx = (neighbour.getX() + 0.5) - eye.x;
-            double dy = (neighbour.getY() + 0.5) - eye.y;
-            double dz = (neighbour.getZ() + 0.5) - eye.z;
-            double distSq = dx * dx + dy * dy + dz * dz;
-            if (distSq < bestDistSq) {
-                bestDistSq = distSq;
-                bestSide = side;
-            }
-        }
-
-        return bestSide;
+        PreparedClick click = findSupportClick(pos, null, -1);
+        if (click == null) return null;
+        return click.hitSide().getOpposite();
     }
 
-    private boolean isInteractable(net.minecraft.world.level.block.Block block) {
+    private boolean isInteractable(net.minecraft.world.level.block.state.BlockState state, BlockPos pos) {
+        var block = state.getBlock();
         return block instanceof BaseEntityBlock
             || block instanceof DoorBlock
             || block instanceof TrapDoorBlock
@@ -389,143 +358,195 @@ public class PlacementManager extends Feature {
             || block instanceof LeverBlock
             || block instanceof BedBlock
             || block instanceof NoteBlock
-            || block instanceof AnvilBlock;
+            || block instanceof AnvilBlock
+            || state.getMenuProvider(mc.level, pos) != null;
     }
 
     @Nullable
     private PreparedClick prepareClick(PlacementTask task) {
         BlockPos pos = task.pos();
         if (!PlaceUtil.canPlace(pos)) return null;
-
-        Direction dir = task.face() != null ? task.face() : getPlaceSide(pos);
-
-        BlockPos neighbour;
-        Vec3 hitPos;
-        Direction hitSide;
-
-        if (dir == null) {
-
-            Direction airDir = getAirPlaceDirection(pos);
-            neighbour = pos;
-            hitPos    = getAirPlaceHitPos(pos, airDir);
-            hitSide   = airDir;
-        } else {
-            neighbour = pos.relative(dir);
-            hitPos    = Vec3.atCenterOf(pos).relative(dir, 0.5);
-            hitSide   = dir.getOpposite();
-        }
-
+        if (task.hotbarSlot() < 0 || task.hotbarSlot() > 35) return null;
         ItemStack stack = mc.player.getInventory().getItem(task.hotbarSlot());
-        if (stack.getItem() instanceof BlockItem blockItem) {
-            BlockState desired = blockItem.getBlock().defaultBlockState();
-            AdjustedHit adjusted = adjustHitForAxisBlock(pos, desired, hitPos, hitSide);
-            if (adjusted != null) {
-                hitSide = adjusted.hitSide();
-                hitPos = adjusted.hitPos();
-            }
-        }
-
-        return new PreparedClick(pos, neighbour, hitPos, hitSide, task.hotbarSlot());
+        if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem)) return null;
+        return findSupportClick(pos, task.face(), task.hotbarSlot());
     }
-
-    /**
-     * Sends the offhand-swap placement burst. Returns true if it changed the
-     * server carried slot (the caller must then restore it). When another swap
-     * already owns the hotbar this tick, the block item is clicked into the held
-     * slot instead of issuing a competing carried-item change, and the carried
-     * slot is left untouched (returns false).
-     */
-    private boolean sendBurst(List<PreparedClick> group, int slot, int currentSelected) {
-        var conn = mc.getConnection();
-
-        int heldSlot = Homovore.swapManager.serverSlot();
-        boolean altSwap = Homovore.swapManager.isHotbarBusy() && heldSlot >= 0 && heldSlot <= 8;
-
-        boolean moved = false;
-        if (altSwap) {
-            moved = heldSlot != slot;
-            if (moved) InventoryUtil.swapToHotbarSlot(slot, heldSlot);
-        } else if (slot != currentSelected) {
-            conn.send(new ServerboundSetCarriedItemPacket(slot));
-        }
-
-        conn.send(new ServerboundPlayerActionPacket(
-                ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND,
-                BlockPos.ZERO,
-                Direction.DOWN
-        ));
-
-        for (PreparedClick click : group) {
-            int sequence = ((ClientLevelAccessor) mc.level)
-                    .homovore$getBlockStatePredictionHandler()
-                    .startPredicting()
-                    .currentSequence();
-            conn.send(new ServerboundUseItemOnPacket(
-                    InteractionHand.OFF_HAND,
-                    new BlockHitResult(click.hitPos(), click.hitSide(), click.neighbour(), false),
-                    sequence
-            ));
-        }
-
-        conn.send(new ServerboundPlayerActionPacket(
-                ServerboundPlayerActionPacket.Action.SWAP_ITEM_WITH_OFFHAND,
-                BlockPos.ZERO,
-                Direction.DOWN
-        ));
-
-        if (altSwap) {
-            if (moved) InventoryUtil.swapToHotbarSlot(slot, heldSlot);
-            return false;
-        }
-        return slot != currentSelected;
-    }
-
-    private record PreparedClick(BlockPos pos, BlockPos neighbour, Vec3 hitPos, Direction hitSide, int hotbarSlot) {}
 
     @Nullable
-    private AdjustedHit adjustHitForAxisBlock(BlockPos pos, BlockState desiredState, Vec3 hitPos, Direction hitSide) {
-        if (desiredState == null || pos == null || hitPos == null || hitSide == null) return null;
-        if (!desiredState.hasProperty(BlockStateProperties.AXIS)) return null;
+    private PreparedClick findSupportClick(BlockPos pos, @Nullable Direction requestedSide, int slot) {
+        Vec3 eye = mc.player.getEyePosition(1.0f);
+        double range = mc.player.blockInteractionRange();
+        double bestDistSq = Double.MAX_VALUE;
+        PreparedClick best = null;
 
-        Direction.Axis axis = desiredState.getValue(BlockStateProperties.AXIS);
-        Direction adjustedSide = switch (axis) {
-            case X -> Direction.EAST;
-            case Z -> Direction.SOUTH;
-            case Y -> Direction.UP;
-        };
+        for (Direction side : Direction.values()) {
+            if (requestedSide != null && side != requestedSide) continue;
+            BlockPos support = pos.relative(side);
+            var state = mc.level.getBlockState(support);
+            if (state.isAir() || state.canBeReplaced()) continue;
+            if (!state.getFluidState().isEmpty()) continue;
+            if (isInteractable(state, support)) continue;
 
-        Vec3 adjustedPos = getAirPlaceHitPos(pos, adjustedSide);
-        return new AdjustedHit(adjustedPos, adjustedSide);
+            Direction hitSide = side.getOpposite();
+            Vec3 hitPos = Vec3.atCenterOf(pos).relative(side, 0.5);
+            hitPos = finiteLocalHit(support, hitPos);
+            if (hitPos == null) continue;
+
+            Vec3 normal = new Vec3(hitSide.getStepX(), hitSide.getStepY(), hitSide.getStepZ());
+            if (eye.subtract(hitPos).dot(normal) <= 1.0e-4) continue;
+            double distSq = eye.distanceToSqr(hitPos);
+            if (distSq > range * range + 1.0e-6) continue;
+            if (!directRaySeesSupport(eye, hitPos, hitSide, support)) continue;
+
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                best = new PreparedClick(pos, support, hitPos, hitSide, slot);
+            }
+        }
+        return best;
     }
 
-    private Direction getAirPlaceDirection(BlockPos pos) {
-        if (mc.player == null) return Direction.UP;
+    @Nullable
+    private Vec3 finiteLocalHit(BlockPos support, Vec3 hit) {
+        double x = hit.x - support.getX();
+        double y = hit.y - support.getY();
+        double z = hit.z - support.getZ();
+        if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) return null;
+        if (x < -1.0e-6 || x > 1.000001 || y < -1.0e-6 || y > 1.000001
+                || z < -1.0e-6 || z > 1.000001) return null;
+        x = Math.max(0.0, Math.min(1.0, x));
+        y = Math.max(0.0, Math.min(1.0, y));
+        z = Math.max(0.0, Math.min(1.0, z));
+        return new Vec3(support.getX() + x, support.getY() + y, support.getZ() + z);
+    }
 
-        Vec3 eyePos = mc.player.getEyePosition();
-        Direction bestDir = Direction.UP;
-        double bestDist = Double.MAX_VALUE;
+    private boolean directRaySeesSupport(Vec3 eye, Vec3 hit, Direction face, BlockPos support) {
+        Vec3 inward = hit.subtract(face.getStepX() * 1.0e-3,
+                face.getStepY() * 1.0e-3, face.getStepZ() * 1.0e-3);
+        BlockHitResult result = mc.level.clip(new ClipContext(
+                eye, inward, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, mc.player));
+        return result.getType() == HitResult.Type.BLOCK
+                && result.getBlockPos().equals(support)
+                && result.getDirection() == face;
+    }
 
-        for (Direction d : Direction.values()) {
-            Vec3 face = getAirPlaceHitPos(pos, d);
-            double dist = eyePos.distanceToSqr(face);
-            if (dist < bestDist) {
-                bestDist = dist;
-                bestDir = d;
+    private boolean serverRayHits(PreparedClick click) {
+        Vec3 eye = mc.player.getEyePosition(1.0f);
+        double range = mc.player.blockInteractionRange();
+        if (eye.distanceToSqr(click.hitPos()) > range * range + 1.0e-6) return false;
+        Vec3 look = getLookVector(Homovore.rotationManager.getServerYaw(),
+                Homovore.rotationManager.getServerPitch());
+        Vec3 end = eye.add(look.scale(range));
+        BlockHitResult result = mc.level.clip(new ClipContext(
+                eye, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, mc.player));
+        return result.getType() == HitResult.Type.BLOCK
+                && result.getBlockPos().equals(click.neighbour())
+                && result.getDirection() == click.hitSide();
+    }
+
+    private static boolean sameClick(PreparedClick a, PreparedClick b) {
+        return a.neighbour().equals(b.neighbour())
+                && a.hitSide() == b.hitSide()
+                && a.hitPos().distanceToSqr(b.hitPos()) < 1.0e-10;
+    }
+
+    private record PreparedClick(BlockPos pos, BlockPos neighbour, Vec3 hitPos,
+                                 Direction hitSide, int hotbarSlot) {}
+
+    private boolean sendNormalPlacement(PendingPlacement pending) {
+        if (Homovore.swapManager.isHotbarBusy()) return false;
+        PlacementTask task = pending.task;
+        boolean inventory = isInventorySlot(task.hotbarSlot());
+        if (inventory && inventorySwapUnsafe()) return false;
+        if (inventory && (!canAltSwap() || !InventoryUtil.cursor().isEmpty())) return false;
+
+        int useSlot = task.hotbarSlot();
+        if (inventory) {
+            useSlot = altSwapIn(task.hotbarSlot());
+            if (useSlot < 0) return false;
+            if (!(mc.player.getInventory().getItem(useSlot).getItem() instanceof BlockItem)) {
+                altSwapOut(task.hotbarSlot(), useSlot);
+                return false;
             }
         }
 
-        return bestDir;
-    }
-
-    private Vec3 getAirPlaceHitPos(BlockPos pos, @Nullable Direction dir) {
-        Vec3 hit = Vec3.atCenterOf(pos);
-        if (dir != null) {
-            hit = hit.add(dir.getStepX() * 0.5, dir.getStepY() * 0.5, dir.getStepZ() * 0.5);
+        int originalServerSlot = Homovore.swapManager.serverSlot();
+        if (originalServerSlot < 0 || originalServerSlot > 8) {
+            originalServerSlot = InventoryUtil.selected();
         }
-        return hit;
+        boolean changedServerSlot = useSlot != originalServerSlot;
+
+        placing = true;
+        try {
+            var conn = mc.getConnection();
+            if (conn == null) {
+                if (inventory) altSwapOut(task.hotbarSlot(), useSlot);
+                return false;
+            }
+            if (changedServerSlot) conn.send(new ServerboundSetCarriedItemPacket(useSlot));
+            try (var handler = ((ClientLevelAccessor) mc.level)
+                    .homovore$getBlockStatePredictionHandler().startPredicting()) {
+                conn.send(new ServerboundUseItemOnPacket(
+                        InteractionHand.MAIN_HAND,
+                        new BlockHitResult(pending.click.hitPos(), pending.click.hitSide(),
+                                pending.click.neighbour(), false),
+                        handler.currentSequence()));
+            }
+        } finally {
+            placing = false;
+        }
+
+        int restoreServerSlot = changedServerSlot ? originalServerSlot : -1;
+        int inventorySlot = inventory ? task.hotbarSlot() : -1;
+        if (restoreServerSlot >= 0 || inventorySlot >= 0) {
+            deferredRestore = new DeferredRestore(restoreServerSlot, inventorySlot, useSlot);
+        }
+        return true;
     }
 
-    private record AdjustedHit(Vec3 hitPos, Direction hitSide) {}
+    private boolean restoreDeferred(DeferredRestore restore) {
+        if (restore.inventorySlot() >= 0) {
+            if (inventorySwapUnsafe() || mc.player.isUsingItem()) return false;
+            if (!canAltSwap() || !InventoryUtil.cursor().isEmpty()) return false;
+        }
+
+        var conn = mc.getConnection();
+        if (conn == null) return false;
+        if (restore.serverSlot() >= 0
+                && Homovore.swapManager.serverSlot() != restore.serverSlot()) {
+            conn.send(new ServerboundSetCarriedItemPacket(restore.serverSlot()));
+        }
+        if (restore.inventorySlot() >= 0) {
+            altSwapOut(restore.inventorySlot(), restore.hotbarSlot());
+        }
+        return true;
+    }
+
+    private boolean inventorySwapUnsafe() {
+        if (mc.player.isSprinting()) return true;
+        if (mc.player.getDeltaMovement().horizontalDistanceSqr() > 1.0e-4) return true;
+        return mc.options.keyUp.isDown() || mc.options.keyDown.isDown()
+                || mc.options.keyLeft.isDown() || mc.options.keyRight.isDown();
+    }
+
+    private void cancelPendingPlacement() {
+        if (pendingPlacement == null) return;
+        pendingPlacement = null;
+        if (Homovore.rotationManager != null) Homovore.rotationManager.cancel(ROTATION_ID);
+    }
+
+    private static final class PendingPlacement {
+        private final PlacementTask task;
+        private PreparedClick click;
+        private int rotationTick = -1;
+
+        private PendingPlacement(PlacementTask task, PreparedClick click) {
+            this.task = task;
+            this.click = click;
+        }
+    }
+
+    private record DeferredRestore(int serverSlot, int inventorySlot, int hotbarSlot) {}
 
     @Subscribe
     private void onPacketReceive(PacketEvent.Receive event) {
@@ -557,47 +578,10 @@ public class PlacementManager extends Feature {
 
     public boolean placeDirect(BlockPos pos, @Nullable Direction face, int hotbarSlot) {
         if (nullCheck()) return false;
-
-        long now = System.currentTimeMillis();
-        while (!recentPlacements.isEmpty() && now - recentPlacements.peekFirst() >= WINDOW_MS) {
-            recentPlacements.pollFirst();
-        }
-
-        if (usingItemAnyTick()) return false;
-        OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
-        if (offhand != null && offhand.shouldDeferForEat()) return false;
-
-        if (recentPlacements.size() >= WINDOW_LIMIT) return false;
-        if (isOnCooldown(pos)) return false;
-
-        PreparedClick click = prepareClick(new PlacementTask(pos, face, hotbarSlot));
-        if (click == null) return false;
-
-        boolean sent = false;
-        placing = true;
-        try {
-            int originalSlot = InventoryUtil.selected();
-            int useSlot = altSwapIn(hotbarSlot);
-            if (useSlot >= 0) {
-                try {
-                    sendBurst(List.of(click), useSlot, originalSlot);
-                    if (useSlot != originalSlot) {
-                        mc.getConnection().send(new ServerboundSetCarriedItemPacket(originalSlot));
-                    }
-                    sent = true;
-                } finally {
-                    altSwapOut(hotbarSlot, useSlot);
-                }
-            }
-        } finally {
-            placing = false;
-        }
-        if (!sent) return false;
-
-        long stamp = System.currentTimeMillis();
-        sentAt.put(click.pos(), stamp);
-        recentPlacements.addLast(stamp);
-        return true;
+        Long completion = directCompletions.remove(pos);
+        if (completion != null && System.currentTimeMillis() - completion <= 1_000L) return true;
+        enqueueTask(pos, face, hotbarSlot, true);
+        return false;
     }
 
     public boolean placeCrystal(BlockPos base, int hotbarSlot) {
@@ -605,13 +589,13 @@ public class PlacementManager extends Feature {
     }
 
     public boolean placeCrystal(BlockPos base, int hotbarSlot, boolean trustBase) {
+        if (hasPending() || !swapSequenceAvailable()) return false;
         boolean altSwap = isInventorySlot(hotbarSlot);
         if (altSwap) {
+            if (inventorySwapUnsafe()) return false;
             if (usingItemAnyTick()) return false;
             OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
             if (offhand != null && offhand.shouldDeferForEat()) return false;
-            if (hasPending()) flushQueue();
-            if (!swapSequenceAvailable()) return false;
         }
 
         BlockHitResult hit = computeCrystalHit(base, trustBase);
@@ -640,7 +624,7 @@ public class PlacementManager extends Feature {
             altSwapOut(hotbarSlot, useSlot);
         }
 
-        if (altSwap) markSwapSequenceUsed();
+        markSwapSequenceUsed();
         return true;
     }
 
@@ -648,8 +632,8 @@ public class PlacementManager extends Feature {
         OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
         if (offhand != null && offhand.shouldDeferForEat()) return false;
 
-        if (hasPending()) flushQueue();
-        if (!swapSequenceAvailable()) return false;
+        if (hasPending() || !swapSequenceAvailable()) return false;
+        if (isInventorySlot(hotbarSlot) && inventorySwapUnsafe()) return false;
 
         BlockHitResult hit = computeCrystalHit(base, trustBase);
         if (hit == null) return false;
@@ -709,6 +693,7 @@ public class PlacementManager extends Feature {
         if (pickaxeSlot < 0 || pickaxeSlot > 8 || crystalSlot < 0 || crystalSlot > 8) return false;
         if (pickaxeSlot == crystalSlot) return false;
         if (!mc.player.getInventory().getItem(crystalSlot).is(Items.END_CRYSTAL)) return false;
+        if (inventorySwapUnsafe()) return false;
 
         OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
         if (offhand != null && offhand.shouldDeferForEat()) return false;
@@ -716,8 +701,7 @@ public class PlacementManager extends Feature {
         // This combo owns the hotbar for the tick; don't fight another active swap.
         if (Homovore.swapManager.isHotbarBusy()) return false;
 
-        if (hasPending()) flushQueue();
-        if (!swapSequenceAvailable()) return false;
+        if (hasPending() || !swapSequenceAvailable()) return false;
 
         BlockHitResult hit = computeCrystalHit(crystalBase, trustBase);
         if (hit == null) return false;
@@ -824,6 +808,7 @@ public class PlacementManager extends Feature {
         if (poses.isEmpty()) return false;
         if (mc.player.containerMenu.containerId != 0) return false;
         if (hotbarSlot < 0 || hotbarSlot > 35) return false;
+        if (hasPending() || !swapSequenceAvailable()) return false;
 
         ItemStack stack = mc.player.getInventory().getItem(hotbarSlot);
         if (stack.isEmpty()) return false;
@@ -833,6 +818,7 @@ public class PlacementManager extends Feature {
 
         int containerSlot = containerSlotOf(hotbarSlot);
         boolean swapped = hotbarSlot != InventoryUtil.selected();
+        if (swapped && inventorySwapUnsafe()) return false;
 
         if (swapped) InventoryUtil.click(containerSlot, InventoryUtil.selected(), ClickType.SWAP);
         try {
@@ -876,5 +862,5 @@ public class PlacementManager extends Feature {
         return new Vec3(g * h, i, f * h);
     }
 
-    private record PlacementTask(BlockPos pos, @Nullable Direction face, int hotbarSlot) {}
+    private record PlacementTask(BlockPos pos, @Nullable Direction face, int hotbarSlot, boolean direct) {}
 }

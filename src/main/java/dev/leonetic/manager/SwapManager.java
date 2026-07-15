@@ -24,6 +24,8 @@ public class SwapManager extends Feature {
 
     private int homeSlot = -1;
 
+    private int pendingServerRestoreSlot = -1;
+
     private boolean wasUsing = false;
     private Item useItem = null;
     private InteractionHand useHand = null;
@@ -74,7 +76,14 @@ public class SwapManager extends Feature {
 
     @Subscribe
     private void onTick(TickEvent event) {
-        if (mc.player == null) { wasUsing = false; homeSlot = -1; return; }
+        if (mc.player == null) {
+            wasUsing = false;
+            homeSlot = -1;
+            pendingServerRestoreSlot = -1;
+            return;
+        }
+
+        restoreServerSlotIfFree();
 
         if (active == null && homeSlot != -1) {
             if (InventoryUtil.selected() != homeSlot) {
@@ -290,6 +299,7 @@ public class SwapManager extends Feature {
         } else {
             suspended = null;
             active = null;
+            restoreServerSlotIfFree();
         }
     }
 
@@ -311,6 +321,29 @@ public class SwapManager extends Feature {
 
     public boolean isBlockedByOther(String id, int priority) {
         return active != null && !active.id.equals(id) && active.priority >= priority;
+    }
+
+    /**
+     * Restore a packet-only swap once no swap owns the server hotbar. This is
+     * useful when a borrowable lease is disabled while a higher-priority swap is
+     * temporarily active: sending now would corrupt that owner, while forgetting
+     * the restore would leave the server on a slot the client is not displaying.
+     */
+    public void requestServerSlotRestore(int slot) {
+        if (slot < 0 || slot > 8) return;
+        pendingServerRestoreSlot = slot;
+        restoreServerSlotIfFree();
+    }
+
+    private void restoreServerSlotIfFree() {
+        if (pendingServerRestoreSlot == -1 || active != null) return;
+        if (mc.player == null || mc.player.connection == null) return;
+
+        int restoreSlot = pendingServerRestoreSlot;
+        pendingServerRestoreSlot = -1;
+        if (serverSlot() != restoreSlot) {
+            mc.player.connection.send(new ServerboundSetCarriedItemPacket(restoreSlot));
+        }
     }
 
     public static final class SwapHandle {

@@ -13,10 +13,12 @@ import dev.leonetic.features.modules.player.*;
 import dev.leonetic.features.settings.Bind;
 import dev.leonetic.features.modules.client.ClickGuiModule;
 import dev.leonetic.features.modules.client.HudClientModule;
+import dev.leonetic.features.modules.client.KittyGodHudModule;
 import dev.leonetic.features.modules.client.NotificationsModule;
 import dev.leonetic.features.modules.client.TargetsModule;
 import dev.leonetic.features.modules.client.TeleportLoggerModule;
 import dev.leonetic.features.modules.funny.TrickshotModule;
+import dev.leonetic.features.modules.funny.AutoLarpModule;
 import dev.leonetic.features.modules.funny.MoFuckerModule;
 import dev.leonetic.features.modules.movement.SprintModule;
 import dev.leonetic.features.modules.movement.VelocityModule;
@@ -65,6 +67,7 @@ public class ModuleManager implements Jsonable, Util {
 
     public void init() {
         register(new HudClientModule());
+        register(new KittyGodHudModule());
         register(new ClickGuiModule());
         register(new NotificationsModule());
         register(new TargetsModule());
@@ -76,6 +79,7 @@ public class ModuleManager implements Jsonable, Util {
         register(new AutoCrystalModule());
         register(new AutoAnchorModule());
         register(new AutoMineModule());
+        register(new AntiPhaseModule());
         register(new AutoXPModule());
         register(new VelocityModule());
         register(new SprintModule());
@@ -109,10 +113,12 @@ public class ModuleManager implements Jsonable, Util {
         register(new ViewModelModule());
         register(new MiddleClickExtraModule());
         register(new KeyPotionModule());
+        register(new ChestSwapModule());
         register(new SurroundModule());
         register(new PistonCrystalModule());
         register(new PearlBlockerModule());
         register(new PhaseModule());
+        register(new AutoLarpModule());
         register(new TrickshotModule());
         register(new MoFuckerModule());
         register(new BomberModule());

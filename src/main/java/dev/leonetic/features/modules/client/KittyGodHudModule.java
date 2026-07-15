@@ -13,7 +13,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-public class KittyGodHudModule extends Module {
+public final class KittyGodHudModule extends Module {
 
     public enum Side { LEFT, RIGHT }
     public enum SortMode { LENGTH, ALPHABETICAL }
@@ -29,10 +29,10 @@ public class KittyGodHudModule extends Module {
     }
 
     @Subscribe
-    private void onRender2D(Render2DEvent event) {
+    public void onRender2D(Render2DEvent event) {
         if (nullCheck()) return;
         
-        GuiGraphics graphics = event.getGuiGraphics();
+        GuiGraphics graphics = event.getContext();
         Font font = mc.font;
         
         int screenWidth = mc.getWindow().getGuiScaledWidth();
@@ -51,7 +51,7 @@ public class KittyGodHudModule extends Module {
         // 2. Draw ArrayList
         List<Module> modules = new ArrayList<>();
         for (Module module : Homovore.moduleManager.getModules()) {
-            if (module.isEnabled() && !module.isHidden()) {
+            if (module.isEnabled() && !module.hidden) {
                 modules.add(module);
             }
         }
