@@ -20,12 +20,15 @@ import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.game.ClientboundBlockDestructionPacket;
+import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.PickaxeItem;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
@@ -61,7 +64,12 @@ public class AutoMineModule extends Module {
     private final Setting<Boolean> glassPush     = bool("GlassPush", false);
     private final Setting<Integer> glassAttempts = num("GlassAttempts", 2, 1, 5);
 
-    private final Setting<SilentSwapMode> silentSwapMode = mode("SilentSwap", SilentSwapMode.Normal);
+    // ---- Silent Swap ----
+    private final Setting<Boolean> silentSwap = bool("SilentSwap", false);
+    private final Setting<Boolean> swapBack   = bool("SwapBack", true)
+            .setVisibility(v -> silentSwap.getValue());
+    private final Setting<Integer> swapBackDelay = num("SwapBackDelay", 2, 0, 20)
+            .setVisibility(v -> silentSwap.getValue() && swapBack.getValue());
 
     private final Setting<Boolean> glassRender = bool("GlassRender", true).setPage("Render");
     private final Setting<Float> glassFadeTime = num("GlassFadeTime", 0.5f, 0.05f, 2.0f).setPage("Render")
@@ -85,6 +93,12 @@ public class AutoMineModule extends Module {
     private BlockPos glassRenderPos = null;
     private long glassRenderStart = 0L;
 
+    // ---- Silent Swap state ----
+    private boolean isSilentSwapped = false;
+    private int originalSlot = -1;
+    private int silentPickaxeSlot = -1;
+    private int swapBackTicks = -1;
+
     private final Long2LongOpenHashMap enemyBreaking = new Long2LongOpenHashMap();
     private static final long ENEMY_BREAK_TTL_MS = 1000;
 
@@ -107,6 +121,7 @@ public class AutoMineModule extends Module {
         if (mine != null) mine.addFinishListener(finishListener);
         enemyBreaking.clear();
         lastOuterPlaceTime = 0;
+        resetSilentSwap();
     }
 
     @Override
@@ -119,6 +134,7 @@ public class AutoMineModule extends Module {
         enemyBreaking.clear();
         resetGlass();
         glassRenderPos = null;
+        resetSilentSwap();
     }
 
     @Subscribe
@@ -138,6 +154,117 @@ public class AutoMineModule extends Module {
         long ts = enemyBreaking.get(pos.asLong());
         return ts != 0L && System.currentTimeMillis() - ts < ENEMY_BREAK_TTL_MS;
     }
+
+    // ============ SILENT SWAP HELPERS ============
+
+    /**
+     * Finds a pickaxe in the player's hotbar (slots 0-8).
+     * Returns the hotbar index, or -1 if none found.
+     */
+    private int findPickaxeSlot() {
+        if (mc.player == null || mc.player.getInventory() == null) return -1;
+        for (int i = 0; i < 9; i++) {
+            ItemStack stack = mc.player.getInventory().getItem(i);
+            if (stack.isEmpty()) continue;
+            if (stack.getItem() instanceof PickaxeItem) return i;
+            // also accept shears as a fallback for glass/wool-like blocks if needed
+            // but for pure pickaxe silent swap, only PickaxeItem counts
+        }
+        return -1;
+    }
+
+    /**
+     * Sends a ServerboundSetCarriedItemPacket to the server so the server thinks
+     * we are holding the pickaxe, but mc.player.getInventory().selected stays unchanged.
+     */
+    private void silentSwapToPickaxe() {
+        if (!silentSwap.getValue()) return;
+        if (isSilentSwapped) return;
+        if (mc.player == null || mc.player.connection == null) return;
+
+        int pick = findPickaxeSlot();
+        if (pick == -1) return;
+
+        int current = mc.player.getInventory().selected;
+        if (pick == current) {
+            // Already visually holding pickaxe, no need to fake it
+            return;
+        }
+
+        originalSlot = current;
+        silentPickaxeSlot = pick;
+        isSilentSwapped = true;
+
+        // Tell the server we switched slots, but don't change the actual inventory.selected
+        mc.player.connection.send(new ServerboundSetCarriedItemPacket(pick));
+    }
+
+    /**
+     * Sends the swap-back packet so the server thinks we returned to our original slot.
+     */
+    private void silentSwapBack() {
+        if (!isSilentSwapped) return;
+        if (mc.player == null || mc.player.connection == null) {
+            isSilentSwapped = false;
+            originalSlot = -1;
+            silentPickaxeSlot = -1;
+            return;
+        }
+        if (originalSlot >= 0 && originalSlot < 9) {
+            mc.player.connection.send(new ServerboundSetCarriedItemPacket(originalSlot));
+        }
+        isSilentSwapped = false;
+        originalSlot = -1;
+        silentPickaxeSlot = -1;
+    }
+
+    private void resetSilentSwap() {
+        silentSwapBack();
+        swapBackTicks = -1;
+    }
+
+    /**
+     * Called every tick to manage the silent swap state.
+     * If we are not actively mining anything (no target, no target blocks, no rebreak),
+     * schedule a swap-back after the configured delay.
+     */
+    private void tickSilentSwap(boolean activelyMining) {
+        if (!silentSwap.getValue()) {
+            if (isSilentSwapped) silentSwapBack();
+            swapBackTicks = -1;
+            return;
+        }
+
+        if (activelyMining) {
+            // ensure swapped
+            silentSwapToPickaxe();
+            swapBackTicks = -1;
+        } else {
+            // not actively mining; start or continue swap-back timer
+            if (isSilentSwapped) {
+                if (swapBackTicks < 0) {
+                    if (swapBack.getValue()) {
+                        swapBackTicks = swapBackDelay.getValue();
+                    } else {
+                        // no swap-back requested; keep holding fake pickaxe until module disables
+                        return;
+                    }
+                }
+                if (swapBackTicks == 0) {
+                    silentSwapBack();
+                    swapBackTicks = -1;
+                } else {
+                    swapBackTicks--;
+                }
+            }
+        }
+    }
+
+    public boolean isSilentSwapEnabled() {
+        return silentSwap.getValue();
+    }
+
+    // ============ END SILENT SWAP HELPERS ============
 
     private void onMineFinish(BlockPos pos) {
 
@@ -203,9 +330,15 @@ public class AutoMineModule extends Module {
 
     private void update() {
         SpeedMineModule mine = speedMine();
-        if (mine == null) return;
+        if (mine == null) {
+            tickSilentSwap(false);
+            return;
+        }
 
-        if (tryCrawlMine(mine)) return;
+        if (tryCrawlMine(mine)) {
+            tickSilentSwap(true);
+            return;
+        }
 
         BlockState selfFeetBlock = mc.level.getBlockState(mc.player.blockPosition());
         BlockState selfHeadBlock = mc.level.getBlockState(mc.player.blockPosition().above());
@@ -216,31 +349,41 @@ public class AutoMineModule extends Module {
         boolean prioHead = false;
 
         if (antiSwim.getValue() == AntiSwimMode.Always && shouldBreakSelfHeadBlock) {
+            silentSwapToPickaxe();
             mine.silentBreakBlock(selfHeadPos, 10);
             prioHead = true;
         }
         if (antiSwim.getValue() == AntiSwimMode.MineOrSwim && mc.player.isVisuallyCrawling()
                 && shouldBreakSelfHeadBlock) {
+            silentSwapToPickaxe();
             mine.silentBreakBlock(selfHeadPos, 30);
             prioHead = true;
         }
         if ((antiSwim.getValue() == AntiSwimMode.Mine || antiSwim.getValue() == AntiSwimMode.MineOrSwim)
                 && isBlockBeingBroken(mc.player.blockPosition()) && shouldBreakSelfHeadBlock) {
+            silentSwapToPickaxe();
             mine.silentBreakBlock(selfHeadPos, 20);
             prioHead = true;
         }
 
         targetPlayer = selectTarget();
-        if (targetPlayer == null) return;
+        if (targetPlayer == null) {
+            tickSilentSwap(false);
+            return;
+        }
 
         handleGlassPush(mine);
 
         if (mine.hasDelayedDestroy() && selfHeadBlock.is(Blocks.OBSIDIAN) && selfFeetBlock.isAir()
                 && selfHeadPos.equals(mine.getRebreakBlockPos())) {
+            tickSilentSwap(true);
             return;
         }
 
-        if (prioHead) return;
+        if (prioHead) {
+            tickSilentSwap(true);
+            return;
+        }
 
         findTargetBlocks();
 
@@ -250,12 +393,16 @@ public class AutoMineModule extends Module {
         if (!isTargetingFeetBlock && mine.canRebreakRebreakBlock()
                 && ((target1 != null && target1.blockPos.equals(mine.getRebreakBlockPos()))
                 || (target2 != null && target2.blockPos.equals(mine.getRebreakBlockPos())))) {
+            tickSilentSwap(true);
             return;
         }
 
         boolean hasBothInProgress = mine.hasDelayedDestroy() && mine.hasRebreakBlock()
                 && !mine.canRebreakRebreakBlock();
-        if (hasBothInProgress && !mine.hasFailingBlock()) return;
+        if (hasBothInProgress && !mine.hasFailingBlock()) {
+            tickSilentSwap(true);
+            return;
+        }
 
         Queue<BlockPos> targetBlocks = new LinkedList<>();
         if (target1 != null) targetBlocks.add(target1.blockPos);
@@ -264,9 +411,17 @@ public class AutoMineModule extends Module {
         while (!targetBlocks.isEmpty() && mine.alreadyBreaking(targetBlocks.peek())) {
             targetBlocks.remove();
         }
+
+        boolean activelyMining;
         if (!targetBlocks.isEmpty()) {
+            silentSwapToPickaxe();
             mine.silentBreakBlock(targetBlocks.remove(), 10);
+            activelyMining = true;
+        } else {
+            activelyMining = mine.hasDelayedDestroy() || mine.hasRebreakBlock();
         }
+
+        tickSilentSwap(activelyMining);
     }
 
     private boolean tryCrawlMine(SpeedMineModule mine) {
@@ -281,6 +436,7 @@ public class AutoMineModule extends Module {
         if (!isBlocked(feetPos, feetBlock) || !isBlocked(headPos, headBlock)) return false;
         if (!InteractionUtil.canBreak(feetPos, feetBlock)) return false;
 
+        silentSwapToPickaxe();
         return mine.silentBreakBlock(feetPos, 200);
     }
 
@@ -380,16 +536,6 @@ public class AutoMineModule extends Module {
         Result glass = InventoryUtil.find(Items.GLASS, InventoryUtil.PLACE_SCOPE);
         if (!glass.found()) return false;
         if (!PlaceUtil.canPlace(pos)) return false;
-
-        // Use silent swap mode if NoPickaxeSwap is enabled
-        if (silentSwapMode.getValue() == SilentSwapMode.NoPickaxeSwap) {
-            if (!InventoryUtil.swapSilent(glass)) return false;
-            if (!Homovore.placementManager.enqueue(pos, glass.slot())) return false;
-            Homovore.placementManager.flushQueue();
-            InventoryUtil.swapBackSilent(glass);
-            return true;
-        }
-
         if (!Homovore.placementManager.enqueue(pos, glass.slot())) return false;
         Homovore.placementManager.flushQueue();
         return true;
@@ -799,6 +945,4 @@ public class AutoMineModule extends Module {
     private enum AntiSurroundMode { None, Inner, Outer, Auto }
 
     private enum ExtendBreakMode { None, Long, Corner }
-
-    private enum SilentSwapMode { Normal, NoPickaxeSwap }
 }
