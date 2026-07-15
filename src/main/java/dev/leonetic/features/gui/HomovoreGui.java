@@ -26,7 +26,10 @@ public class HomovoreGui extends Screen {
     private long openTime = 0;
     private boolean closing = false;
     private long closeTime = 0;
-    private static final long FADE_DURATION = 150L;
+    private float closeStartProgress = 1f;
+    private float slideOffset = 0f;
+    private static final long ANIMATION_DURATION = 220L;
+    private static final float SLIDE_DISTANCE = 28f;
 
     static {
         INSTANCE = new HomovoreGui();
@@ -86,14 +89,17 @@ public class HomovoreGui extends Screen {
         openTime = System.currentTimeMillis();
         closing = false;
         alpha = 0f;
+        slideOffset = -SLIDE_DISTANCE;
         GuiNavigator.reset();
     }
 
     @Override
     public void onClose() {
         if (!closing) {
+            long now = System.currentTimeMillis();
             closing = true;
-            closeTime = System.currentTimeMillis();
+            closeTime = now;
+            closeStartProgress = Math.min(1f, (float) (now - openTime) / ANIMATION_DURATION);
             if (searchBar != null) searchBar.clear();
             GuiNavigator.reset();
         }
@@ -103,26 +109,36 @@ public class HomovoreGui extends Screen {
     public void render(GuiGraphics context, int mouseX, int mouseY, float delta) {
         long now = System.currentTimeMillis();
         if (!closing) {
-            alpha = Math.min(1f, (float) (now - openTime) / FADE_DURATION);
+            float progress = Math.min(1f, (float) (now - openTime) / ANIMATION_DURATION);
+            alpha = easeOutCubic(progress);
         } else {
-            alpha = Math.max(0f, 1f - (float) (now - closeTime) / FADE_DURATION);
+            float progress = Math.max(0f,
+                    closeStartProgress - (float) (now - closeTime) / ANIMATION_DURATION);
+            alpha = easeOutCubic(progress);
             if (alpha <= 0f) {
                 minecraft.setScreen(null);
                 return;
             }
         }
+        slideOffset = -SLIDE_DISTANCE * (1f - alpha);
 
         GuiFade.alpha = alpha;
         Item.context = context;
         context.fill(0, 0, context.guiWidth(), context.guiHeight(), GuiFade.apply(GuiTheme.SCREEN_DIM));
         float s = getScale();
         int sx = (int) (mouseX / s);
-        int sy = (int) (mouseY / s);
+        int sy = (int) ((mouseY - slideOffset) / s);
         context.pose().pushMatrix();
+        context.pose().translate(0f, slideOffset);
         context.pose().scale(s, s);
         this.widgets.forEach(components -> components.drawScreen(context, sx, sy, delta));
         context.pose().popMatrix();
         GuiFade.alpha = 1f;
+    }
+
+    private static float easeOutCubic(float progress) {
+        float remaining = 1f - progress;
+        return 1f - remaining * remaining * remaining;
     }
 
     public static float getScale() {
@@ -134,7 +150,7 @@ public class HomovoreGui extends Screen {
         if (closing) return true;
         float s = getScale();
         int mx = (int) (click.x() / s);
-        int my = (int) (click.y() / s);
+        int my = (int) ((click.y() - slideOffset) / s);
         this.widgets.forEach(components -> components.mouseClicked(mx, my, click.button()));
         return super.mouseClicked(click, doubled);
     }
@@ -144,7 +160,7 @@ public class HomovoreGui extends Screen {
         if (closing) return true;
         float s = getScale();
         int mx = (int) (click.x() / s);
-        int my = (int) (click.y() / s);
+        int my = (int) ((click.y() - slideOffset) / s);
         this.widgets.forEach(components -> components.mouseReleased(mx, my, click.button()));
         return super.mouseReleased(click);
     }
@@ -154,7 +170,7 @@ public class HomovoreGui extends Screen {
         if (closing) return true;
         float s = getScale();
         int mx = (int) (mouseX / s);
-        int my = (int) (mouseY / s);
+        int my = (int) ((mouseY - slideOffset) / s);
         for (Widget widget : this.widgets) {
             if (widget.isHoveringBody(mx, my)) {
                 widget.scroll(verticalAmount);
