@@ -12,6 +12,7 @@ import static java.lang.Math.abs;
 
 public class DiscordRPCModule extends Module {
     private static final long APP_ID = 1497806002139955270L;
+    private static final String MINOTAR_URL_FORMAT = "https://minotar.net/helm/%s/100.png";
 
     public enum LineMode {
         CUSTOM, SERVER, DIMENSION, HEALTH, STATS
@@ -25,9 +26,11 @@ public class DiscordRPCModule extends Module {
 
     private final Setting<Boolean>  hideIp = bool("HideIP", false).setPage("General");
     private final Setting<Integer>  antileak = num("AntiLeakRadius", 50000, 1000, 100000).setPage("General");
+    private final Setting<Integer>  updateInterval = num("UpdateInterval", 20, 5, 100).setPage("General");
     
-    private static final RichPresence rpc = new RichPresence();
+    private final RichPresence rpc = new RichPresence();
     private int ticks;
+    private String cachedPlayerName;
 
     public DiscordRPCModule() {
         super("DiscordRPC", "Shows a highly customizable Discord Rich Presence.", Category.FUNNY);
@@ -35,20 +38,30 @@ public class DiscordRPCModule extends Module {
 
     @Override
     public void onEnable() {
-        DiscordIPC.start(APP_ID, null);
-        rpc.setStart(System.currentTimeMillis() / 1000L);
-        rpc.setLargeImage("icon", "Homovore Client");
-        ticks = 0;
+        try {
+            DiscordIPC.start(APP_ID, null);
+            rpc.setStart(System.currentTimeMillis() / 1000L);
+            rpc.setLargeImage("icon", "Homovore Client");
+            ticks = 0;
+            cachedPlayerName = null;
+        } catch (Exception e) {
+            e.printStackTrace();
+            setEnabled(false);
+        }
     }
 
     @Override
     public void onDisable() {
-        DiscordIPC.stop();
+        try {
+            DiscordIPC.stop();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     @Override
     public void onTick() {
-        if (++ticks < 20) return;
+        if (++ticks < updateInterval.getValue()) return;
         ticks = 0;
 
         if (nullCheck()) return;
@@ -57,8 +70,12 @@ public class DiscordRPCModule extends Module {
         rpc.setState(formatLine(line2Mode.getValue(), line2Custom.getValue()));
 
         if (mc.player != null) {
-            String name = mc.player.getName().getString();
-            rpc.setSmallImage("https://minotar.net/helm/" + name + "/100.png", name);
+            String currentName = mc.player.getName().getString();
+            // Only update avatar if player name changed
+            if (!currentName.equals(cachedPlayerName)) {
+                cachedPlayerName = currentName;
+                rpc.setSmallImage(String.format(MINOTAR_URL_FORMAT, currentName), currentName);
+            }
         }
 
         DiscordIPC.setActivity(rpc);
@@ -75,7 +92,7 @@ public class DiscordRPCModule extends Module {
     }
 
     private String applyTokens(String text) {
-        if (text == null) return "";
+        if (text == null || text.isEmpty()) return "";
         return text.replace("[server]", getServerIp())
                    .replace("[ping]", String.valueOf(getPing()))
                    .replace("[health]", getHealth())
@@ -95,13 +112,17 @@ public class DiscordRPCModule extends Module {
 
     private String getDimensionText() {
         if (mc.player == null) return "Unknown";
-        String dimPath = mc.player.level().dimension().identifier().getPath();
-        return switch (dimPath) {
-            case "overworld" -> "Overworld";
-            case "the_nether" -> "The Nether";
-            case "the_end" -> "The End";
-            default -> dimPath;
-        };
+        try {
+            String dimPath = mc.player.level().dimension().identifier().getPath();
+            return switch (dimPath) {
+                case "overworld" -> "Overworld";
+                case "the_nether" -> "The Nether";
+                case "the_end" -> "The End";
+                default -> dimPath;
+            };
+        } catch (Exception e) {
+            return "Unknown";
+        }
     }
 
     private String getCoordsText() {
@@ -125,23 +146,40 @@ public class DiscordRPCModule extends Module {
 
     private int getPing() {
         if (mc.player == null || mc.getConnection() == null) return 0;
-        var info = mc.getConnection().getPlayerInfo(mc.player.getUUID());
-        return info == null ? 0 : info.getLatency();
+        try {
+            var info = mc.getConnection().getPlayerInfo(mc.player.getUUID());
+            return info == null ? 0 : info.getLatency();
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     private int getTotems() {
         if (mc.player == null) return 0;
         int count = 0;
-        for (int i = 0; i < mc.player.getInventory().getContainerSize(); i++) {
-            ItemStack stack = mc.player.getInventory().getItem(i);
-            if (stack.getItem() == Items.TOTEM_OF_UNDYING) {
-                count += stack.getCount();
+        try {
+            var inventory = mc.player.getInventory();
+            for (int i = 0; i < inventory.getContainerSize(); i++) {
+                ItemStack stack = inventory.getItem(i);
+                if (stack.getItem() == Items.TOTEM_OF_UNDYING) {
+                    count += stack.getCount();
+                }
             }
+        } catch (Exception e) {
+            // Return 0 if inventory access fails
         }
         return count;
     }
 
     private int getActiveModules() {
-        return (int) Homovore.moduleManager.getModules().stream().filter(Module::isEnabled).count();
+        try {
+            return (int) Homovore.moduleManager.getModules().stream().filter(Module::isEnabled).count();
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private boolean nullCheck() {
+        return mc == null || mc.player == null;
     }
 }
